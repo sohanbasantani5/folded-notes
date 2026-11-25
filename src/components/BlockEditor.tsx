@@ -1,39 +1,20 @@
 import React, {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
 import { motion } from 'motion/react';
-import { useEditor, EditorContent } from '@tiptap/react';
-import StarterKit from '@tiptap/starter-kit';
-import Underline from '@tiptap/extension-underline';
-import TaskList from '@tiptap/extension-task-list';
-import TaskItem from '@tiptap/extension-task-item';
-import Placeholder from '@tiptap/extension-placeholder';
-import {
-  Bold,
-  Check,
-  CheckSquare,
-  Copy,
-  Italic,
-  Link2,
-  List,
-  ListOrdered,
-  Quote,
-  Redo2,
-  Underline as UnderlineIcon,
-  Undo2,
-} from 'lucide-react';
-import { BlockType, Note, NoteBlock } from '../types/note';
+import { Editor } from '@tiptap/react';
+import { Check, Copy, Redo2, Undo2 } from 'lucide-react';
+import { Note, NoteBlock } from '../types/note';
 import {
   blocksToPlainText,
   createBlock,
   formatRelativeDate,
 } from '../utils/blocks';
-import { filterSlashCommands, SlashMenu } from './SlashMenu';
+import { RichEditorSurface } from './RichEditorSurface';
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -43,37 +24,8 @@ interface BlockEditorProps {
   unfoldKey: number;
   isSplitPane?: boolean;
   onUpdateNote: (updater: (prev: Note) => Note) => void;
+  onEditorReady?: (editor: Editor | null) => void;
 }
-
-interface SlashState {
-  isOpen: boolean;
-  rangeFrom: number;
-  rangeTo: number;
-  query: string;
-  position: { top: number; left: number };
-  selectedIndex: number;
-}
-
-interface SelectionToolbarState {
-  visible: boolean;
-  top: number;
-  left: number;
-}
-
-const INITIAL_SLASH_STATE: SlashState = {
-  isOpen: false,
-  rangeFrom: 0,
-  rangeTo: 0,
-  query: '',
-  position: { top: 0, left: 0 },
-  selectedIndex: 0,
-};
-
-const INITIAL_TOOLBAR_STATE: SelectionToolbarState = {
-  visible: false,
-  top: 0,
-  left: 0,
-};
 
 // ─── blocks ↔ Tiptap HTML conversion ─────────────────────────────────────────
 
@@ -200,90 +152,21 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
   unfoldKey,
   isSplitPane = false,
   onUpdateNote,
+  onEditorReady,
 }) => {
-  const [slash, setSlash] = useState<SlashState>(INITIAL_SLASH_STATE);
-  const [toolbar, setToolbar] = useState<SelectionToolbarState>(INITIAL_TOOLBAR_STATE);
+  const [editor, setEditor] = useState<Editor | null>(null);
   const [copiedNote, setCopiedNote] = useState(false);
-
   const titleRef = useRef<HTMLTextAreaElement | null>(null);
-  const isInternalUpdateRef = useRef(false);
-  const lastNoteIdRef = useRef(note.id);
 
-  const filteredCommands = useMemo(() => filterSlashCommands(slash.query), [slash.query]);
-  const closeSlashMenu = useCallback(() => setSlash(INITIAL_SLASH_STATE), []);
+  const contentHtml = useMemo(() => blocksToTiptapHtml(note.blocks), [note.blocks]);
 
-  const editor = useEditor({
-    extensions: [
-      StarterKit.configure({
-        heading: { levels: [1, 2] },
-      }),
-      Underline,
-      TaskList,
-      TaskItem.configure({ nested: false }),
-      Placeholder.configure({
-        placeholder: 'Begin writing, or type "/" for commands...',
-      }),
-    ],
-    content: blocksToTiptapHtml(note.blocks),
-    onUpdate: ({ editor: ed }) => {
-      isInternalUpdateRef.current = true;
-      const html = ed.getHTML();
-      const nextBlocks = tiptapHtmlToBlocks(html);
-      onUpdateNote((prev) => ({
-        ...prev,
-        blocks: nextBlocks,
-        updatedAt: Date.now(),
-      }));
-
-      // Detect slash command trigger
-      const { from } = ed.state.selection;
-      const $pos = ed.state.doc.resolve(from);
-      const textBefore = $pos.parent.textBetween(0, $pos.parentOffset, undefined, '\ufffc');
-      const match = textBefore.match(/(?:^|\s)\/([a-zA-Z0-9-]*)$/);
-      if (match) {
-        const query = match[1] ?? '';
-        const slashFrom = from - query.length - 1;
-        const coords = ed.view.coordsAtPos(from);
-        setSlash({
-          isOpen: true,
-          rangeFrom: slashFrom,
-          rangeTo: from,
-          query,
-          position: { top: coords.bottom + 6, left: coords.left },
-          selectedIndex: 0,
-        });
-      } else {
-        setSlash((prev) => (prev.isOpen ? INITIAL_SLASH_STATE : prev));
-      }
+  const handleEditorReady = useCallback(
+    (ed: Editor | null) => {
+      setEditor(ed);
+      onEditorReady?.(ed);
     },
-    onSelectionUpdate: ({ editor: ed }) => {
-      const { from, to, empty } = ed.state.selection;
-      if (empty || from === to) {
-        setToolbar((prev) => (prev.visible ? INITIAL_TOOLBAR_STATE : prev));
-        return;
-      }
-      const startCoords = ed.view.coordsAtPos(from);
-      const endCoords = ed.view.coordsAtPos(to);
-      const midLeft = (startCoords.left + endCoords.left) / 2;
-      const clampedLeft = Math.max(16, Math.min(window.innerWidth - 380, midLeft - 170));
-      const clampedTop = Math.max(12, Math.min(startCoords.top, endCoords.top) - 52);
-      setToolbar({ visible: true, top: clampedTop, left: clampedLeft });
-    },
-  });
-
-  // Sync editor content when switching notes
-  useEffect(() => {
-    if (!editor) return;
-    if (lastNoteIdRef.current !== note.id) {
-      lastNoteIdRef.current = note.id;
-      isInternalUpdateRef.current = false;
-      editor.commands.setContent(blocksToTiptapHtml(note.blocks), { emitUpdate: false });
-      setSlash(INITIAL_SLASH_STATE);
-      setToolbar(INITIAL_TOOLBAR_STATE);
-    } else if (isInternalUpdateRef.current) {
-      isInternalUpdateRef.current = false;
-    }
-  }, [note.id, note.blocks, editor]);
+    [onEditorReady]
+  );
 
   // Title auto-resize
   useLayoutEffect(() => {
@@ -293,96 +176,16 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
     el.style.height = `${el.scrollHeight}px`;
   }, [note.title, note.id]);
 
-  // Close toolbar on outside mousedown
-  useEffect(() => {
-    const handleMouseDown = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target?.closest('[data-selection-toolbar="true"]')) return;
-      if (!editor) return;
-      if (editor.state.selection.empty) {
-        setToolbar((prev) => (prev.visible ? INITIAL_TOOLBAR_STATE : prev));
-      }
-    };
-    document.addEventListener('mousedown', handleMouseDown);
-    return () => document.removeEventListener('mousedown', handleMouseDown);
-  }, [editor]);
-
-  // Apply slash command
-  const applySlashCommand = useCallback(
-    (commandType: BlockType) => {
-      if (!editor) return;
-      const chain = editor
-        .chain()
-        .focus()
-        .deleteRange({ from: slash.rangeFrom, to: slash.rangeTo });
-
-      switch (commandType) {
-        case 'h1':
-          chain.setHeading({ level: 1 }).run();
-          break;
-        case 'h2':
-          chain.setHeading({ level: 2 }).run();
-          break;
-        case 'bullet':
-          chain.toggleBulletList().run();
-          break;
-        case 'numbered':
-          chain.toggleOrderedList().run();
-          break;
-        case 'checklist':
-          chain.toggleTaskList().run();
-          break;
-        case 'callout':
-          chain.toggleBlockquote().run();
-          break;
-        case 'divider':
-          chain.setHorizontalRule().run();
-          break;
-        default:
-          chain.setParagraph().run();
-          break;
-      }
-      closeSlashMenu();
+  const handleChangeHtml = useCallback(
+    (html: string) => {
+      const nextBlocks = tiptapHtmlToBlocks(html);
+      onUpdateNote((prev) => ({
+        ...prev,
+        blocks: nextBlocks,
+        updatedAt: Date.now(),
+      }));
     },
-    [editor, slash.rangeFrom, slash.rangeTo, closeSlashMenu]
-  );
-
-  // Slash menu keyboard navigation
-  const handleEditorKeyDownCapture = useCallback(
-    (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (!slash.isOpen) return;
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        e.stopPropagation();
-        if (filteredCommands.length > 0) {
-          setSlash((prev) => ({
-            ...prev,
-            selectedIndex: (prev.selectedIndex + 1) % filteredCommands.length,
-          }));
-        }
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        e.stopPropagation();
-        if (filteredCommands.length > 0) {
-          setSlash((prev) => ({
-            ...prev,
-            selectedIndex:
-              (prev.selectedIndex - 1 + filteredCommands.length) % filteredCommands.length,
-          }));
-        }
-      } else if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        e.stopPropagation();
-        const chosen = filteredCommands[slash.selectedIndex];
-        if (chosen) applySlashCommand(chosen.id);
-        else closeSlashMenu();
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        closeSlashMenu();
-      }
-    },
-    [slash.isOpen, slash.selectedIndex, filteredCommands, applySlashCommand, closeSlashMenu]
+    [onUpdateNote]
   );
 
   const handleCopyNote = useCallback(async () => {
@@ -416,8 +219,8 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
       className="print-only-canvas relative h-full w-full overflow-y-auto cursor-text"
       style={{ backgroundColor: 'var(--bg-canvas)', perspective: '1200px' }}
     >
-      {/* Quiet top-right Undo / Redo / Copy Note bar */}
-      {!focusMode && (
+      {/* Quiet top-right Undo / Redo / Copy Note bar (main view) */}
+      {!focusMode && !isSplitPane && (
         <div
           className="no-print sticky top-3 z-20 float-right mr-4 mt-3 flex items-center gap-0.5 rounded-lg px-1.5 py-1"
           style={{
@@ -511,9 +314,12 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
         </div>
 
         {/* Tiptap Editor Body */}
-        <div onKeyDownCapture={handleEditorKeyDownCapture}>
-          <EditorContent editor={editor} />
-        </div>
+        <RichEditorSurface
+          docKey={note.id}
+          contentHtml={contentHtml}
+          onChangeHtml={handleChangeHtml}
+          onEditorReady={handleEditorReady}
+        />
 
         {/* Click target below editor */}
         <div
@@ -522,169 +328,6 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           aria-hidden="true"
         />
       </motion.article>
-
-      {/* Floating Selection Toolbar */}
-      {toolbar.visible && editor && (
-        <div
-          data-selection-toolbar="true"
-          onMouseDown={(e) => e.preventDefault()}
-          className="no-print fixed z-50 flex items-center gap-0.5 rounded-xl px-2 py-1.5"
-          style={{
-            top: toolbar.top,
-            left: toolbar.left,
-            backgroundColor: 'var(--bg-surface)',
-            border: '1px solid var(--border-strong)',
-            boxShadow: '0 10px 28px rgba(0, 0, 0, 0.12)',
-            color: 'var(--ink-primary)',
-          }}
-        >
-          <button
-            type="button"
-            onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
-            className="rounded-md px-2 py-1 text-[13px] font-medium transition-colors"
-            style={{
-              backgroundColor: editor.isActive('heading', { level: 1 })
-                ? 'var(--accent-soft)'
-                : 'transparent',
-              color: editor.isActive('heading', { level: 1 })
-                ? 'var(--accent)'
-                : 'var(--ink-primary)',
-            }}
-          >
-            H1
-          </button>
-
-          <button
-            type="button"
-            onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
-            className="rounded-md px-2 py-1 text-[13px] font-medium transition-colors"
-            style={{
-              backgroundColor: editor.isActive('heading', { level: 2 })
-                ? 'var(--accent-soft)'
-                : 'transparent',
-              color: editor.isActive('heading', { level: 2 })
-                ? 'var(--accent)'
-                : 'var(--ink-primary)',
-            }}
-          >
-            H2
-          </button>
-
-          <button
-            type="button"
-            title="Bold (Ctrl+B / ⌘B)"
-            onClick={() => editor.chain().focus().toggleBold().run()}
-            className="rounded-md px-2 py-1 text-[13px] font-bold transition-colors"
-            style={{
-              backgroundColor: editor.isActive('bold') ? 'var(--accent-soft)' : 'transparent',
-              color: editor.isActive('bold') ? 'var(--accent)' : 'var(--ink-primary)',
-            }}
-          >
-            <Bold className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            type="button"
-            title="Italic (Ctrl+I / ⌘I)"
-            onClick={() => editor.chain().focus().toggleItalic().run()}
-            className="rounded-md p-1.5 transition-colors hover:bg-black/5"
-            style={{
-              backgroundColor: editor.isActive('italic') ? 'var(--accent-soft)' : 'transparent',
-              color: editor.isActive('italic') ? 'var(--accent)' : 'var(--ink-primary)',
-            }}
-          >
-            <Italic className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            type="button"
-            title="Underline (Ctrl+U / ⌘U)"
-            onClick={() => editor.chain().focus().toggleUnderline().run()}
-            className="rounded-md p-1.5 transition-colors hover:bg-black/5"
-            style={{
-              backgroundColor: editor.isActive('underline') ? 'var(--accent-soft)' : 'transparent',
-              color: editor.isActive('underline') ? 'var(--accent)' : 'var(--ink-primary)',
-            }}
-          >
-            <UnderlineIcon className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            type="button"
-            title="Code"
-            onClick={() => editor.chain().focus().toggleCode().run()}
-            className="rounded-md p-1.5 transition-colors hover:bg-black/5"
-            style={{
-              backgroundColor: editor.isActive('code') ? 'var(--accent-soft)' : 'transparent',
-              color: editor.isActive('code') ? 'var(--accent)' : 'var(--ink-primary)',
-            }}
-          >
-            <Link2 className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            type="button"
-            title="Quote Callout"
-            onClick={() => editor.chain().focus().toggleBlockquote().run()}
-            className="rounded-md p-1.5 transition-colors hover:bg-black/5"
-            style={{
-              backgroundColor: editor.isActive('blockquote') ? 'var(--accent-soft)' : 'transparent',
-              color: editor.isActive('blockquote') ? 'var(--accent)' : 'var(--ink-primary)',
-            }}
-          >
-            <Quote className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            type="button"
-            title="Bullet List"
-            onClick={() => editor.chain().focus().toggleBulletList().run()}
-            className="rounded-md p-1.5 transition-colors hover:bg-black/5"
-            style={{
-              backgroundColor: editor.isActive('bulletList') ? 'var(--accent-soft)' : 'transparent',
-              color: editor.isActive('bulletList') ? 'var(--accent)' : 'var(--ink-primary)',
-            }}
-          >
-            <List className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            type="button"
-            title="Numbered List"
-            onClick={() => editor.chain().focus().toggleOrderedList().run()}
-            className="rounded-md p-1.5 transition-colors hover:bg-black/5"
-            style={{
-              backgroundColor: editor.isActive('orderedList') ? 'var(--accent-soft)' : 'transparent',
-              color: editor.isActive('orderedList') ? 'var(--accent)' : 'var(--ink-primary)',
-            }}
-          >
-            <ListOrdered className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            type="button"
-            title="Checklist"
-            onClick={() => editor.chain().focus().toggleTaskList().run()}
-            className="rounded-md p-1.5 transition-colors hover:bg-black/5"
-            style={{
-              backgroundColor: editor.isActive('taskList') ? 'var(--accent-soft)' : 'transparent',
-              color: editor.isActive('taskList') ? 'var(--accent)' : 'var(--ink-primary)',
-            }}
-          >
-            <CheckSquare className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
-
-      <SlashMenu
-        isOpen={slash.isOpen}
-        position={slash.position}
-        items={filteredCommands}
-        selectedIndex={slash.selectedIndex}
-        onSelect={applySlashCommand}
-        onHover={(i) => setSlash((prev) => ({ ...prev, selectedIndex: i }))}
-        onClose={closeSlashMenu}
-      />
     </div>
   );
 };

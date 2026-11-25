@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeftRight, Eraser, Undo2 } from 'lucide-react';
+import { Editor } from '@tiptap/react';
+import { ArrowLeftRight, Eraser, Redo2, Undo2 } from 'lucide-react';
 import { Note } from '../types/note';
+import { htmlToText } from '../utils/blocks';
 import { BlockEditor } from './BlockEditor';
+import { RichEditorSurface } from './RichEditorSurface';
 
 interface SplitScreenWorkspaceProps {
   note: Note;
@@ -10,6 +13,21 @@ interface SplitScreenWorkspaceProps {
   unfoldKey: number;
   onSwapPanes: () => void;
   onUpdateNote: (updater: (prev: Note) => Note) => void;
+}
+
+function referenceToHtml(raw: string): string {
+  if (!raw) return '<p></p>';
+  if (/<[a-z][\s\S]*>/i.test(raw)) return raw;
+  return raw
+    .split(/\n/)
+    .map((line) => {
+      const escaped = line
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      return `<p>${escaped}</p>`;
+    })
+    .join('');
 }
 
 export const SplitScreenWorkspace: React.FC<SplitScreenWorkspaceProps> = ({
@@ -24,11 +42,19 @@ export const SplitScreenWorkspace: React.FC<SplitScreenWorkspaceProps> = ({
   const [leftPercent, setLeftPercent] = useState<number>(46);
   const [dragging, setDragging] = useState(false);
   const [clearedBackup, setClearedBackup] = useState<string | null>(null);
+  const [refEditor, setRefEditor] = useState<Editor | null>(null);
+  const [writeEditor, setWriteEditor] = useState<Editor | null>(null);
 
+  const referencePlain = useMemo(() => htmlToText(note.referenceText), [note.referenceText]);
   const referenceWordCount = useMemo(() => {
-    const trimmed = note.referenceText.trim();
+    const trimmed = referencePlain.trim();
     return trimmed ? trimmed.split(/\s+/).filter(Boolean).length : 0;
-  }, [note.referenceText]);
+  }, [referencePlain]);
+
+  const referenceHtml = useMemo(
+    () => referenceToHtml(note.referenceText),
+    [note.referenceText]
+  );
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
@@ -63,7 +89,7 @@ export const SplitScreenWorkspace: React.FC<SplitScreenWorkspaceProps> = ({
   }, [dragging]);
 
   const handleClearReference = () => {
-    if (!note.referenceText.trim()) return;
+    if (!referencePlain.trim()) return;
     setClearedBackup(note.referenceText);
     onUpdateNote((prev) => ({
       ...prev,
@@ -82,6 +108,18 @@ export const SplitScreenWorkspace: React.FC<SplitScreenWorkspaceProps> = ({
       updatedAt: Date.now(),
     }));
   };
+
+  const handleReferenceChange = useCallback(
+    (html: string) => {
+      if (clearedBackup !== null) setClearedBackup(null);
+      onUpdateNote((prev) => ({
+        ...prev,
+        referenceText: html,
+        updatedAt: Date.now(),
+      }));
+    },
+    [clearedBackup, onUpdateNote]
+  );
 
   const referencePane = (
     <section
@@ -108,8 +146,29 @@ export const SplitScreenWorkspace: React.FC<SplitScreenWorkspaceProps> = ({
           </span>
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
-          {clearedBackup !== null && !note.referenceText && (
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            title="Undo (Ctrl+Z / ⌘Z)"
+            disabled={!refEditor?.can().undo()}
+            onClick={() => refEditor?.chain().focus().undo().run()}
+            className="rounded p-1 transition-colors hover:bg-black/5 disabled:opacity-30"
+            style={{ color: 'var(--ink-muted)' }}
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            title="Redo (Ctrl+Y / ⌘⇧Z)"
+            disabled={!refEditor?.can().redo()}
+            onClick={() => refEditor?.chain().focus().redo().run()}
+            className="rounded p-1 transition-colors hover:bg-black/5 disabled:opacity-30"
+            style={{ color: 'var(--ink-muted)' }}
+          >
+            <Redo2 className="h-3.5 w-3.5" />
+          </button>
+
+          {clearedBackup !== null && !referencePlain.trim() && (
             <button
               type="button"
               onClick={handleUndoClear}
@@ -139,7 +198,7 @@ export const SplitScreenWorkspace: React.FC<SplitScreenWorkspaceProps> = ({
           <button
             type="button"
             onClick={handleClearReference}
-            disabled={!note.referenceText.trim()}
+            disabled={!referencePlain.trim()}
             title="Clear reference text"
             className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium whitespace-nowrap transition-opacity duration-200 disabled:opacity-35"
             style={{ color: 'var(--ink-secondary)' }}
@@ -150,22 +209,24 @@ export const SplitScreenWorkspace: React.FC<SplitScreenWorkspaceProps> = ({
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 py-6">
-        <textarea
-          value={note.referenceText}
-          onChange={(e) => {
-            if (clearedBackup !== null) setClearedBackup(null);
-            const val = e.target.value;
-            onUpdateNote((prev) => ({
-              ...prev,
-              referenceText: val,
-              updatedAt: Date.now(),
-            }));
-          }}
-          placeholder="Paste study questions, source excerpts, transcripts, or prompt templates here for side-by-side reference..."
-          aria-label="Reference material"
-          className="folio-editor-font h-full min-h-[360px] w-full resize-none bg-transparent text-[14.5px] leading-[1.75] outline-none placeholder:opacity-40"
-          style={{ color: 'var(--ink-secondary)' }}
+      <div
+        onClick={(e) => {
+          const target = e.target as HTMLElement | null;
+          if (target?.closest('.ProseMirror, button, input, a, [data-selection-toolbar="true"]')) {
+            return;
+          }
+          const sel = window.getSelection();
+          if (sel && !sel.isCollapsed) return;
+          refEditor?.commands.focus('end');
+        }}
+        className="flex-1 overflow-y-auto px-6 py-6 cursor-text"
+      >
+        <RichEditorSurface
+          docKey={`ref-${note.id}`}
+          contentHtml={referenceHtml}
+          placeholder="Paste study questions, source excerpts, or type '/' for commands..."
+          onChangeHtml={handleReferenceChange}
+          onEditorReady={setRefEditor}
         />
       </div>
     </section>
@@ -187,12 +248,34 @@ export const SplitScreenWorkspace: React.FC<SplitScreenWorkspaceProps> = ({
         >
           Write / Answer
         </span>
-        <span
-          className="text-[11.5px] whitespace-nowrap"
-          style={{ color: 'var(--ink-muted)' }}
-        >
-          Slash commands active
-        </span>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            title="Undo (Ctrl+Z / ⌘Z)"
+            disabled={!writeEditor?.can().undo()}
+            onClick={() => writeEditor?.chain().focus().undo().run()}
+            className="rounded p-1 transition-colors hover:bg-black/5 disabled:opacity-30"
+            style={{ color: 'var(--ink-muted)' }}
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            title="Redo (Ctrl+Y / ⌘⇧Z)"
+            disabled={!writeEditor?.can().redo()}
+            onClick={() => writeEditor?.chain().focus().redo().run()}
+            className="rounded p-1 transition-colors hover:bg-black/5 disabled:opacity-30"
+            style={{ color: 'var(--ink-muted)' }}
+          >
+            <Redo2 className="h-3.5 w-3.5" />
+          </button>
+          <span
+            className="ml-1 text-[11.5px] whitespace-nowrap"
+            style={{ color: 'var(--ink-muted)' }}
+          >
+            Slash commands active
+          </span>
+        </div>
       </div>
       <div className="min-h-0 flex-1">
         <BlockEditor
@@ -201,6 +284,7 @@ export const SplitScreenWorkspace: React.FC<SplitScreenWorkspaceProps> = ({
           unfoldKey={unfoldKey}
           isSplitPane
           onUpdateNote={onUpdateNote}
+          onEditorReady={setWriteEditor}
         />
       </div>
     </section>
