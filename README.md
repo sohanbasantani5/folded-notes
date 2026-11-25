@@ -1,3 +1,4 @@
+<img width="1919" height="943" alt="image" src="https://github.com/user-attachments/assets/a06373a1-8f1a-479e-8ef6-bc9f7f207cda" />
 # folded notes.
 
 A minimal, local-first editorial note-taking studio built for deep thinking, studying, and prompt drafting. Zero accounts, zero cloud lock-in, and 100% browser-native persistence via `IndexedDB` and `localStorage`.
