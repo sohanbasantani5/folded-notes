@@ -285,3 +285,159 @@ input:focus-visible {
   word-break: break-word;
   overflow-wrap: break-word;
 }
+
+/* ── Tiptap (.ProseMirror) editorial styles ───────────────────────────────── */
+
+.ProseMirror {
+  outline: none !important;
+  box-shadow: none !important;
+  color: var(--ink-primary);
+  font-family: var(--editor-font);
+  letter-spacing: var(--editor-tracking);
+  line-height: var(--editor-leading);
+  font-size: 16px;
+  min-height: 120px;
+}
+
+.ProseMirror:focus,
+.ProseMirror:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.ProseMirror > * + * {
+  margin-top: 0.6em;
+}
+
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: var(--ink-muted);
+  opacity: 0.45;
+  pointer-events: none;
+  height: 0;
+}
+
+.ProseMirror h1 {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+  margin-top: 1.15em;
+  margin-bottom: 0.25em;
+  color: var(--ink-primary);
+}
+
+.ProseMirror h2 {
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.38;
+  letter-spacing: -0.015em;
+  margin-top: 0.95em;
+  margin-bottom: 0.2em;
+  color: var(--ink-primary);
+}
+
+.ProseMirror strong {
+  font-weight: 700;
+}
+
+.ProseMirror em {
+  font-style: italic;
+}
+
+.ProseMirror u {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ProseMirror code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.88em;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-hairline);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+.ProseMirror ul:not([data-type="taskList"]) {
+  list-style-type: disc;
+  padding-left: 1.4em;
+}
+
+.ProseMirror ol {
+  list-style-type: decimal;
+  padding-left: 1.4em;
+}
+
+.ProseMirror li > p {
+  margin: 0;
+}
+
+.ProseMirror ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0;
+}
+
+.ProseMirror ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  margin: 0.3em 0;
+}
+
+.ProseMirror ul[data-type="taskList"] li > label {
+  flex: 0 0 auto;
+  margin-top: 0.22rem;
+  user-select: none;
+  cursor: pointer;
+}
+
+.ProseMirror ul[data-type="taskList"] li > label input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 17px;
+  height: 17px;
+  border-radius: 5px;
+  border: 1.5px solid var(--border-strong);
+  background: transparent;
+  cursor: pointer;
+  display: grid;
+  place-content: center;
+  transition: background-color 180ms ease, border-color 180ms ease;
+}
+
+.ProseMirror ul[data-type="taskList"] li > label input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.ProseMirror ul[data-type="taskList"] li > label input[type="checkbox"]:checked::before {
+  content: "";
+  width: 9px;
+  height: 5px;
+  border-left: 2px solid var(--accent-ink);
+  border-bottom: 2px solid var(--accent-ink);
+  transform: rotate(-45deg) translate(1px, -1px);
+}
+
+.ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div {
+  text-decoration: line-through;
+  color: var(--ink-muted);
+}
+
+.ProseMirror blockquote {
+  margin: 0.9em 0;
+  padding: 0.9rem 1.25rem;
+  background-color: var(--bg-callout);
+  border: 1px solid var(--border-hairline);
+  border-radius: 0.75rem;
+  font-style: italic;
+  color: var(--ink-primary);
+}
+
+.ProseMirror hr {
+  border: 0;
+  border-top: 1px solid var(--border-strong);
+  margin: 1.4em 0;
+}
