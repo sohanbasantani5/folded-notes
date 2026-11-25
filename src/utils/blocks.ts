@@ -1,5 +1,23 @@
 import { BlockType, ExportFormat, Note, NoteBlock } from '../types/note';
 
+/** Strip HTML tags and decode basic entities → plain text. */
+export function htmlToText(html: string): string {
+  // If no tags present, return as-is
+  if (!/<[a-z][\s\S]*>/i.test(html)) return html;
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|li|blockquote|h[1-6]|tr)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function createId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -30,7 +48,7 @@ export function countNoteStats(title: string, blocks: NoteBlock[]): {
   }
   for (const b of blocks) {
     if (b.type !== 'divider' && b.content.length > 0) {
-      parts.push(b.content);
+      parts.push(htmlToText(b.content));
     }
   }
   const combined = parts.join('\n');
@@ -44,7 +62,7 @@ export function getNotePlainPreview(note: Note, maxLength = 150): string {
   const lines: string[] = [];
   for (const b of note.blocks) {
     if (b.type === 'divider') continue;
-    const text = b.content.trim();
+    const text = htmlToText(b.content).trim();
     if (!text) continue;
     if (b.type === 'checklist') {
       lines.push(`${b.checked ? '☑' : '☐'} ${text}`);
@@ -73,31 +91,32 @@ export function blocksToMarkdown(title: string, blocks: NoteBlock[]): string {
     } else {
       numberedIndex = 0;
     }
+    const text = htmlToText(block.content);
 
     switch (block.type) {
       case 'h1':
-        lines.push(`# ${block.content}`);
+        lines.push(`# ${text}`);
         break;
       case 'h2':
-        lines.push(`## ${block.content}`);
+        lines.push(`## ${text}`);
         break;
       case 'bullet':
-        lines.push(`- ${block.content}`);
+        lines.push(`- ${text}`);
         break;
       case 'numbered':
-        lines.push(`${numberedIndex}. ${block.content}`);
+        lines.push(`${numberedIndex}. ${text}`);
         break;
       case 'checklist':
-        lines.push(`- [${block.checked ? 'x' : ' '}] ${block.content}`);
+        lines.push(`- [${block.checked ? 'x' : ' '}] ${text}`);
         break;
       case 'divider':
         lines.push('---');
         break;
       case 'callout':
-        lines.push(`> ${block.content}`);
+        lines.push(`> ${text}`);
         break;
       default:
-        lines.push(block.content);
+        lines.push(text);
         break;
     }
   }
@@ -118,29 +137,30 @@ export function blocksToPlainText(title: string, blocks: NoteBlock[]): string {
     } else {
       numberedIndex = 0;
     }
+    const text = htmlToText(block.content);
 
     switch (block.type) {
       case 'h1':
       case 'h2':
-        lines.push(block.content);
+        lines.push(text);
         break;
       case 'bullet':
-        lines.push(`• ${block.content}`);
+        lines.push(`• ${text}`);
         break;
       case 'numbered':
-        lines.push(`${numberedIndex}. ${block.content}`);
+        lines.push(`${numberedIndex}. ${text}`);
         break;
       case 'checklist':
-        lines.push(`[${block.checked ? 'x' : ' '}] ${block.content}`);
+        lines.push(`[${block.checked ? 'x' : ' '}] ${text}`);
         break;
       case 'divider':
         lines.push('────────────────────');
         break;
       case 'callout':
-        lines.push(`"${block.content}"`);
+        lines.push(`"${text}"`);
         break;
       default:
-        lines.push(block.content);
+        lines.push(text);
         break;
     }
   }
@@ -164,33 +184,27 @@ export function blocksToHtmlDocument(title: string, blocks: NoteBlock[]): string
   let inOl = false;
 
   const closeLists = () => {
-    if (inUl) {
-      bodyParts.push('</ul>');
-      inUl = false;
-    }
-    if (inOl) {
-      bodyParts.push('</ol>');
-      inOl = false;
-    }
+    if (inUl) { bodyParts.push('</ul>'); inUl = false; }
+    if (inOl) { bodyParts.push('</ol>'); inOl = false; }
   };
 
   for (const block of blocks) {
-    const safe = escapeHtml(block.content).replace(/\n/g, '<br />');
+    // If content has HTML tags use it directly (already safe, from contentEditable)
+    // Otherwise escape it (legacy plain-text notes)
+    const hasHtml = /<[a-z][\s\S]*>/i.test(block.content);
+    const safe = hasHtml
+      ? block.content.replace(/\n/g, '<br />')
+      : escapeHtml(block.content).replace(/\n/g, '<br />');
+
     if (block.type === 'bullet') {
       if (inOl) closeLists();
-      if (!inUl) {
-        bodyParts.push('<ul>');
-        inUl = true;
-      }
+      if (!inUl) { bodyParts.push('<ul>'); inUl = true; }
       bodyParts.push(`<li>${safe}</li>`);
       continue;
     }
     if (block.type === 'numbered') {
       if (inUl) closeLists();
-      if (!inOl) {
-        bodyParts.push('<ol>');
-        inOl = true;
-      }
+      if (!inOl) { bodyParts.push('<ol>'); inOl = true; }
       bodyParts.push(`<li>${safe}</li>`);
       continue;
     }
@@ -385,6 +399,13 @@ export function exportNoteToFormat(
       triggerFileDownload(payload, filename, 'application/json;charset=utf-8');
       return filename;
     }
+    case 'pdf': {
+      // PDF export is handled via window.print() in App.tsx;
+      // return a placeholder filename for consistency.
+      return `${baseName}.pdf`;
+    }
+    default:
+      return '';
   }
 }
 

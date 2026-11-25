@@ -1,8 +1,1 @@
-{
-  "name": "Sohan's Note Talking",
-  "description": "A minimal, editorial personal note-taking studio for deep thinking, studying, and prompt writing.",
-  "requestFramePermissions": [],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
-  ]
-}
+{"name":"Sohan\u0027s Note Talking","description":"A minimal, editorial personal note-taking studio for deep thinking, studying, and prompt writing.","requestFramePermissions":[],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}

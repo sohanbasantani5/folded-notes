@@ -242,3 +242,37 @@ input:focus-visible {
     border-top: 1px solid #D4D4D4 !important;
   }
 }
+
+/* ── contentEditable blocks ───────────────────────────────────────────────── */
+
+/* Placeholder via data-placeholder attribute (shown when block is empty) */
+[contenteditable][data-placeholder]:empty::before {
+  content: attr(data-placeholder);
+  pointer-events: none;
+  user-select: none;
+  color: inherit;
+  opacity: 0.35;
+}
+
+/* Inline formatting styles inside contentEditable blocks */
+[contenteditable] strong {
+  font-weight: 700;
+}
+[contenteditable] em {
+  font-style: italic;
+}
+[contenteditable] code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.88em;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-hairline);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+/* Prevent browser adding extra divs/spans on Enter in contentEditable */
+[contenteditable] {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}

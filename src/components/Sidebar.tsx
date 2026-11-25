@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import {
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   Columns2,
   Download,
@@ -118,6 +120,7 @@ interface SidebarProps {
   onOpenFile: (file: File) => void;
   onExport: (format: ExportFormat) => void;
   onSelectNote: (noteId: string) => void;
+  onMoveNote: (noteId: string, direction: 'up' | 'down') => void;
   onDeleteNote: (noteId: string) => void;
   onToggleNotesGrid: () => void;
   onToggleSplitScreen: () => void;
@@ -151,6 +154,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenFile,
   onExport,
   onSelectNote,
+  onMoveNote,
   onDeleteNote,
   onToggleNotesGrid,
   onToggleSplitScreen,
@@ -376,13 +380,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <span className="tabular-nums">{notes.length}</span>
           </div>
           <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-0.5">
-            {notes.map((n) => {
+            {notes.map((n, index) => {
               const isCurrent = n.id === activeNoteId && viewMode === 'editor';
               const tint = PAPER_TINTS[n.tint] ?? PAPER_TINTS['warm-paper'];
               return (
                 <div
                   key={n.id}
-                  className="group flex items-center gap-1 rounded-lg transition-colors duration-150"
+                  className="group flex items-center gap-0.5 rounded-lg transition-colors duration-150"
                   style={{ backgroundColor: isCurrent ? 'var(--bg-subtle)' : 'transparent' }}
                 >
                   <button
@@ -405,19 +409,51 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       {n.title.trim() || 'Untitled Note'}
                     </span>
                   </button>
+
                   {notes.length > 1 && (
-                    <button
-                      type="button"
-                      aria-label={`Delete ${n.title || 'Untitled Note'}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteNote(n.id);
-                      }}
-                      className="mr-1 rounded p-1 opacity-0 transition-opacity duration-150 group-hover:opacity-70 hover:!opacity-100 focus-visible:opacity-100"
-                      style={{ color: 'var(--ink-muted)' }}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
+                    <div className="flex items-center pr-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-80 focus-within:opacity-100">
+                      <button
+                        type="button"
+                        disabled={index === 0}
+                        aria-label={`Move ${n.title || 'Untitled Note'} up`}
+                        title="Move up"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onMoveNote(n.id, 'up');
+                        }}
+                        className="rounded p-0.5 disabled:opacity-25 hover:opacity-100"
+                        style={{ color: 'var(--ink-muted)' }}
+                      >
+                        <ArrowUp className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={index === notes.length - 1}
+                        aria-label={`Move ${n.title || 'Untitled Note'} down`}
+                        title="Move down"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onMoveNote(n.id, 'down');
+                        }}
+                        className="rounded p-0.5 disabled:opacity-25 hover:opacity-100"
+                        style={{ color: 'var(--ink-muted)' }}
+                      >
+                        <ArrowDown className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Delete ${n.title || 'Untitled Note'}`}
+                        title="Delete note"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteNote(n.id);
+                        }}
+                        className="rounded p-0.5 hover:opacity-100"
+                        style={{ color: 'var(--ink-muted)' }}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
                   )}
                 </div>
               );

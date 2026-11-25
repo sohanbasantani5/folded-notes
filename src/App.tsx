@@ -270,7 +270,24 @@ export default function App() {
     setViewMode('editor');
     setUnfoldKey((k) => k + 1);
   }, []);
-
+const handleMoveNote = useCallback((noteId: string, direction: 'up' | 'down') => {
+    setNotes((prev) => {
+      const idx = prev.findIndex((n) => n.id === noteId);
+      if (idx === -1) return prev;
+      const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+      const copy = [...prev];
+      const [item] = copy.splice(idx, 1);
+      copy.splice(targetIdx, 0, item);
+      saveAllNotes(copy);
+      try {
+        localStorage.setItem('folio_notes_v1', JSON.stringify(copy));
+      } catch {
+        // Ignore quota errors
+      }
+      return copy;
+    });
+  }, []);
   const handleDeleteNote = useCallback(
     (noteId: string) => {
       setNotes((prev) => {
@@ -459,6 +476,7 @@ export default function App() {
         charCount={stats.characters}
         viewMode={viewMode}
         splitScreen={settings.splitScreen}
+        onMoveNote={handleMoveNote}
         isFullscreen={isFullscreen}
         collapsed={sidebarHidden}
         customMascotUrl={customMascotUrl}
