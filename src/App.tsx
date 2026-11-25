@@ -288,6 +288,24 @@ const handleMoveNote = useCallback((noteId: string, direction: 'up' | 'down') =>
       return copy;
     });
   }, []);
+
+  const handleTogglePinNote = useCallback((noteId: string) => {
+    setNotes((prev) => {
+      const toggled = prev.map((n) =>
+        n.id === noteId ? { ...n, pinned: !n.pinned } : n
+      );
+      const pinned = toggled.filter((n) => n.pinned);
+      const unpinned = toggled.filter((n) => !n.pinned);
+      const next = [...pinned, ...unpinned];
+      saveAllNotes(next);
+      try {
+        localStorage.setItem('folio_notes_v1', JSON.stringify(next));
+      } catch {
+        // Ignore quota errors
+      }
+      return next;
+    });
+  }, []);
   const handleDeleteNote = useCallback(
     (noteId: string) => {
       setNotes((prev) => {
@@ -477,6 +495,7 @@ const handleMoveNote = useCallback((noteId: string, direction: 'up' | 'down') =>
         viewMode={viewMode}
         splitScreen={settings.splitScreen}
         onMoveNote={handleMoveNote}
+        onTogglePinNote={handleTogglePinNote}
         isFullscreen={isFullscreen}
         collapsed={sidebarHidden}
         customMascotUrl={customMascotUrl}

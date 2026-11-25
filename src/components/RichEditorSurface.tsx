@@ -5,6 +5,8 @@ import Underline from '@tiptap/extension-underline';
 import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
 import Placeholder from '@tiptap/extension-placeholder';
+import Image from '@tiptap/extension-image';
+import Link from '@tiptap/extension-link';
 import {
   Bold,
   CheckSquare,
@@ -63,6 +65,44 @@ const INITIAL_TOOLBAR_STATE: SelectionToolbarState = {
   left: 0,
 };
 
+/** Compress an image File client-side (max 1400px wide, 0.85 quality) → data URL. */
+function compressImageFile(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read image'));
+    reader.onload = () => {
+      const img = new window.Image();
+      img.onerror = () => reject(new Error('Invalid image'));
+      img.onload = () => {
+        const maxWidth = 1400;
+        const scale = img.width > maxWidth ? maxWidth / img.width : 1;
+        const width = Math.round(img.width * scale);
+        const height = Math.round(img.height * scale);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(reader.result as string);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const isPng = file.type === 'image/png';
+        const mime = isPng ? 'image/png' : 'image/webp';
+        let dataUrl = canvas.toDataURL(mime, 0.85);
+        if (!isPng && !dataUrl.startsWith('data:image/webp')) {
+          dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        }
+        resolve(dataUrl);
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
   docKey,
   contentHtml,
@@ -77,6 +117,7 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
   const isInternalUpdateRef = useRef(false);
   const lastDocKeyRef = useRef(docKey);
   const lastExternalHtmlRef = useRef(contentHtml);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   const filteredCommands = useMemo(() => filterSlashCommands(slash.query), [slash.query]);
   const closeSlashMenu = useCallback(() => setSlash(INITIAL_SLASH_STATE), []);
@@ -94,8 +135,49 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
       TaskList,
       TaskItem.configure({ nested: false }),
       Placeholder.configure({ placeholder }),
+      Image.configure({ inline: false, allowBase64: true }),
+      Link.configure({ openOnClick: true, autolink: true, linkOnPaste: true }),
     ],
     content: contentHtml,
+    editorProps: {
+      handlePaste: (view, event) => {
+        const items = event.clipboardData?.items;
+        if (!items) return false;
+        for (const item of Array.from(items)) {
+          if (item.type.startsWith('image/')) {
+            const file = item.getAsFile();
+            if (!file) continue;
+            event.preventDefault();
+            compressImageFile(file).then((src) => {
+              const { schema, tr } = view.state;
+              const node = schema.nodes.image?.create({ src });
+              if (node) view.dispatch(tr.replaceSelectionWith(node));
+            }).catch(() => {});
+            return true;
+          }
+        }
+        return false;
+      },
+      handleDrop: (view, event) => {
+        const files = event.dataTransfer?.files;
+        if (!files || files.length === 0) return false;
+        const imageFiles = Array.from(files).filter((f) => f.type.startsWith('image/'));
+        if (imageFiles.length === 0) return false;
+        event.preventDefault();
+        const coords = view.posAtCoords({ left: event.clientX, top: event.clientY });
+        for (const file of imageFiles) {
+          compressImageFile(file).then((src) => {
+            const { schema, tr } = view.state;
+            const node = schema.nodes.image?.create({ src });
+            if (node) {
+              const pos = coords?.pos ?? view.state.selection.from;
+              view.dispatch(tr.insert(pos, node));
+            }
+          }).catch(() => {});
+        }
+        return true;
+      },
+    },
     onUpdate: ({ editor: ed }) => {
       isInternalUpdateRef.current = true;
       const html = ed.getHTML();
@@ -207,6 +289,10 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
         case 'divider':
           chain.setHorizontalRule().run();
           break;
+        case 'image':
+          chain.run();
+          imageInputRef.current?.click();
+          break;
         default:
           chain.setParagraph().run();
           break;
@@ -255,6 +341,23 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
 
   return (
     <div className={className} onKeyDownCapture={handleEditorKeyDownCapture}>
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        aria-hidden="true"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = '';
+          if (!file || !editor) return;
+          compressImageFile(file)
+            .then((src) => {
+              editor.chain().focus().setImage({ src }).run();
+            })
+            .catch(() => {});
+        }}
+      />
       <EditorContent editor={editor} />
 
       {toolbar.visible && editor && (
@@ -344,12 +447,21 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
 
           <button
             type="button"
-            title="Code"
-            onClick={() => editor.chain().focus().toggleCode().run()}
+            title="Link"
+            onClick={() => {
+              if (editor.isActive('link')) {
+                editor.chain().focus().unsetLink().run();
+                return;
+              }
+              const url = window.prompt('Enter URL');
+              if (url && url.trim()) {
+                editor.chain().focus().setLink({ href: url.trim() }).run();
+              }
+            }}
             className="rounded-md p-1.5 transition-colors hover:bg-black/5"
             style={{
-              backgroundColor: editor.isActive('code') ? 'var(--accent-soft)' : 'transparent',
-              color: editor.isActive('code') ? 'var(--accent)' : 'var(--ink-primary)',
+              backgroundColor: editor.isActive('link') ? 'var(--accent-soft)' : 'transparent',
+              color: editor.isActive('link') ? 'var(--accent)' : 'var(--ink-primary)',
             }}
           >
             <Link2 className="h-3.5 w-3.5" />

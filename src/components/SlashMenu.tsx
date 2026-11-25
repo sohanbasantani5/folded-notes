@@ -3,6 +3,7 @@ import {
   CheckSquare,
   Heading1,
   Heading2,
+  Image as ImageIcon,
   List,
   ListOrdered,
   Minus,
@@ -68,6 +69,13 @@ export const SLASH_COMMANDS: SlashCommandItem[] = [
     keywords: ['callout', 'quote', 'blockquote', 'note', 'excerpt', '>'],
     shortcutHint: '“”',
   },
+  {
+    id: 'image',
+    label: 'Image',
+    description: 'Upload or embed an image',
+    keywords: ['image', 'photo', 'picture', 'img', 'upload'],
+    shortcutHint: 'IMG',
+  },
 ];
 
 export function filterSlashCommands(query: string): SlashCommandItem[] {
@@ -98,6 +106,8 @@ function CommandIcon({ type }: { type: BlockType }) {
       return <Minus className={cls} strokeWidth={1.7} />;
     case 'callout':
       return <Quote className={cls} strokeWidth={1.7} />;
+    case 'image':
+      return <ImageIcon className={cls} strokeWidth={1.7} />;
     default:
       return null;
   }

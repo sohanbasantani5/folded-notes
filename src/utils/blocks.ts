@@ -115,6 +115,9 @@ export function blocksToMarkdown(title: string, blocks: NoteBlock[]): string {
       case 'callout':
         lines.push(`> ${text}`);
         break;
+      case 'image':
+        lines.push(`![image](${block.content})`);
+        break;
       default:
         lines.push(text);
         break;
@@ -230,6 +233,11 @@ export function blocksToHtmlDocument(title: string, blocks: NoteBlock[]): string
         break;
       case 'callout':
         bodyParts.push(`<blockquote>${safe}</blockquote>`);
+        break;
+      case 'image':
+        bodyParts.push(
+          `<p><img src="${escapeHtml(block.content)}" alt="Embedded image" style="max-width:100%;border-radius:10px;margin:12px 0;" /></p>`
+        );
         break;
       default:
         bodyParts.push(safe ? `<p>${safe}</p>` : '<p>&nbsp;</p>');

@@ -94,6 +94,9 @@ function blocksToTiptapHtml(blocks: NoteBlock[]): string {
       case 'divider':
         parts.push('<hr>');
         break;
+      case 'image':
+        parts.push(`<img src="${block.content.replace(/"/g, '&quot;')}" alt="Embedded image">`);
+        break;
       default:
         parts.push(`<p>${html}</p>`);
         break;
@@ -115,6 +118,9 @@ function tiptapHtmlToBlocks(html: string): NoteBlock[] {
       blocks.push(createBlock('h2', node.innerHTML));
     } else if (tag === 'hr') {
       blocks.push(createBlock('divider', ''));
+    } else if (tag === 'img') {
+      const src = node.getAttribute('src') ?? '';
+      if (src) blocks.push(createBlock('image', src));
     } else if (tag === 'blockquote') {
       const inner = node.querySelector('p')?.innerHTML ?? node.innerHTML;
       blocks.push(createBlock('callout', inner));

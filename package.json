@@ -13,6 +13,8 @@
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
+    "@tiptap/extension-image": "^3.35.0",
+    "@tiptap/extension-link": "^3.35.0",
     "@tiptap/extension-placeholder": "^3.35.0",
     "@tiptap/extension-task-item": "^3.35.0",
     "@tiptap/extension-task-list": "^3.35.0",

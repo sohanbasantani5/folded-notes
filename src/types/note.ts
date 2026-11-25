@@ -6,7 +6,8 @@ export type BlockType =
   | 'numbered'
   | 'checklist'
   | 'divider'
-  | 'callout';
+  | 'callout'
+  | 'image';
 
 export interface NoteBlock {
   id: string;
@@ -28,6 +29,7 @@ export interface Note {
   blocks: NoteBlock[];
   tint: PaperTintId;
   referenceText: string;
+  pinned?: boolean;
   createdAt: number;
   updatedAt: number;
 }

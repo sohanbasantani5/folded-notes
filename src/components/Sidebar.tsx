@@ -12,13 +12,16 @@ import {
   Maximize2,
   Minimize2,
   PanelLeftClose,
+  Pin,
   Plus,
   Printer,
+  Search,
   Settings,
   Trash2,
 } from 'lucide-react';
 import { ExportFormat, Note, ViewMode } from '../types/note';
 import { PAPER_TINTS } from '../data/themes';
+import { htmlToText } from '../utils/blocks';
 
 export const InlineMascot: React.FC<{
   customMascotUrl: string | null;
@@ -121,6 +124,7 @@ interface SidebarProps {
   onExport: (format: ExportFormat) => void;
   onSelectNote: (noteId: string) => void;
   onMoveNote: (noteId: string, direction: 'up' | 'down') => void;
+  onTogglePinNote: (noteId: string) => void;
   onDeleteNote: (noteId: string) => void;
   onToggleNotesGrid: () => void;
   onToggleSplitScreen: () => void;
@@ -155,6 +159,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onExport,
   onSelectNote,
   onMoveNote,
+  onTogglePinNote,
   onDeleteNote,
   onToggleNotesGrid,
   onToggleSplitScreen,
@@ -163,8 +168,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenSettings,
 }) => {
   const [exportOpen, setExportOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const exportMenuRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const filteredNotes = React.useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return notes;
+    return notes.filter((n) => {
+      if (n.title.toLowerCase().includes(q)) return true;
+      return n.blocks.some((b) => htmlToText(b.content).toLowerCase().includes(q));
+    });
+  }, [notes, searchQuery]);
 
   useEffect(() => {
     if (!exportOpen) return;
@@ -375,12 +403,33 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         <div className="mt-4 flex min-h-0 flex-1 flex-col pt-4" style={{ borderTop: '1px solid var(--border-hairline)' }}>
+          <div className="mb-2 px-1">
+            <div
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1"
+              style={{
+                backgroundColor: 'var(--bg-subtle)',
+                border: '1px solid var(--border-hairline)',
+              }}
+            >
+              <Search className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--ink-muted)' }} />
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search notes… (Ctrl+K)"
+                aria-label="Search notes"
+                className="w-full bg-transparent text-[12px] outline-none placeholder:opacity-50"
+                style={{ color: 'var(--ink-primary)' }}
+              />
+            </div>
+          </div>
           <div className="mb-1.5 flex items-center justify-between px-2 text-[11px] font-medium" style={{ color: 'var(--ink-muted)' }}>
             <span>Recent Notes</span>
-            <span className="tabular-nums">{notes.length}</span>
+            <span className="tabular-nums">{filteredNotes.length}</span>
           </div>
           <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-0.5">
-            {notes.map((n, index) => {
+            {filteredNotes.map((n, index) => {
               const isCurrent = n.id === activeNoteId && viewMode === 'editor';
               const tint = PAPER_TINTS[n.tint] ?? PAPER_TINTS['warm-paper'];
               return (
@@ -410,51 +459,66 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </span>
                   </button>
 
-                  {notes.length > 1 && (
-                    <div className="flex items-center pr-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-80 focus-within:opacity-100">
-                      <button
-                        type="button"
-                        disabled={index === 0}
-                        aria-label={`Move ${n.title || 'Untitled Note'} up`}
-                        title="Move up"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onMoveNote(n.id, 'up');
-                        }}
-                        className="rounded p-0.5 disabled:opacity-25 hover:opacity-100"
-                        style={{ color: 'var(--ink-muted)' }}
-                      >
-                        <ArrowUp className="h-3 w-3" />
-                      </button>
-                      <button
-                        type="button"
-                        disabled={index === notes.length - 1}
-                        aria-label={`Move ${n.title || 'Untitled Note'} down`}
-                        title="Move down"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onMoveNote(n.id, 'down');
-                        }}
-                        className="rounded p-0.5 disabled:opacity-25 hover:opacity-100"
-                        style={{ color: 'var(--ink-muted)' }}
-                      >
-                        <ArrowDown className="h-3 w-3" />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={`Delete ${n.title || 'Untitled Note'}`}
-                        title="Delete note"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDeleteNote(n.id);
-                        }}
-                        className="rounded p-0.5 hover:opacity-100"
-                        style={{ color: 'var(--ink-muted)' }}
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </div>
-                  )}
+                  <div className="flex items-center pr-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-80 focus-within:opacity-100">
+                    <button
+                      type="button"
+                      aria-label={n.pinned ? `Unpin ${n.title || 'Untitled Note'}` : `Pin ${n.title || 'Untitled Note'}`}
+                      title={n.pinned ? 'Unpin note' : 'Pin note to top'}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onTogglePinNote(n.id);
+                      }}
+                      className="rounded p-0.5 hover:opacity-100"
+                      style={{ color: n.pinned ? 'var(--accent)' : 'var(--ink-muted)' }}
+                    >
+                      <Pin className="h-3 w-3" />
+                    </button>
+                    {notes.length > 1 && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={index === 0}
+                          aria-label={`Move ${n.title || 'Untitled Note'} up`}
+                          title="Move up"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onMoveNote(n.id, 'up');
+                          }}
+                          className="rounded p-0.5 disabled:opacity-25 hover:opacity-100"
+                          style={{ color: 'var(--ink-muted)' }}
+                        >
+                          <ArrowUp className="h-3 w-3" />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={index === notes.length - 1}
+                          aria-label={`Move ${n.title || 'Untitled Note'} down`}
+                          title="Move down"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onMoveNote(n.id, 'down');
+                          }}
+                          className="rounded p-0.5 disabled:opacity-25 hover:opacity-100"
+                          style={{ color: 'var(--ink-muted)' }}
+                        >
+                          <ArrowDown className="h-3 w-3" />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Delete ${n.title || 'Untitled Note'}`}
+                          title="Delete note"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDeleteNote(n.id);
+                          }}
+                          className="rounded p-0.5 hover:opacity-100"
+                          style={{ color: 'var(--ink-muted)' }}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               );
             })}
