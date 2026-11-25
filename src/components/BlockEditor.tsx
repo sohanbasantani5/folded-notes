@@ -10,16 +10,20 @@ import { motion } from 'motion/react';
 import {
   Bold,
   Check,
+  Copy,
   Italic,
   Link2,
   List,
   ListOrdered,
-  MoreHorizontal,
   Quote,
+  Redo2,
   Trash2,
+  Underline,
+  Undo2,
 } from 'lucide-react';
 import { BlockType, Note, NoteBlock } from '../types/note';
 import {
+  blocksToPlainText,
   createBlock,
   formatRelativeDate,
   parseTextToBlocks,
@@ -87,9 +91,9 @@ function htmlToPlainText(html: string): string {
 
 /** Sanitise pasted / stored HTML to only allow safe inline formatting. */
 function sanitiseInlineHtml(html: string): string {
-  // Allow: strong, em, code, br, span. Strip everything else.
+  // Allow: strong, em, u, code, br, span. Strip everything else.
   return html
-    .replace(/<(?!\/?(?:strong|em|code|br|span)[>\s])[^>]+>/gi, '')
+    .replace(/<(?!\/?(?:strong|em|u|code|br|span)[>\s])[^>]+>/gi, '')
     .replace(/<br\s*\/?>/gi, '\n');
 }
 
@@ -197,6 +201,8 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
   );
   const [slash, setSlash] = useState<SlashState>(INITIAL_SLASH_STATE);
   const [toolbar, setToolbar] = useState<SelectionToolbarState>(INITIAL_TOOLBAR_STATE);
+  const [copiedNote, setCopiedNote] = useState(false);
+  const [, setHistoryTick] = useState(0);
 
   const titleRef = useRef<HTMLTextAreaElement | null>(null);
   // contentEditable divs keyed by block id
@@ -205,6 +211,8 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
   const pendingFocusRef = useRef<{ blockId: string; caret?: number } | null>(null);
   // Track whether a contentEditable input came from programmatic set (suppress re-render loop)
   const suppressInputRef = useRef<Set<string>>(new Set());
+  // Undo/Redo history stack per note (up to 50 snapshots)
+  const historyRef = useRef<Record<string, { past: NoteBlock[][]; future: NoteBlock[][] }>>({});
 
   const filteredCommands = useMemo(() => filterSlashCommands(slash.query), [slash.query]);
 
@@ -273,9 +281,20 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
 
   const closeSlashMenu = useCallback(() => setSlash(INITIAL_SLASH_STATE), []);
 
+  const getNoteHistory = useCallback((noteId: string) => {
+    if (!historyRef.current[noteId]) {
+      historyRef.current[noteId] = { past: [], future: [] };
+    }
+    return historyRef.current[noteId];
+  }, []);
+
   const updateBlocks = useCallback(
     (updater: (blocks: NoteBlock[]) => NoteBlock[]) => {
       onUpdateNote((prev) => {
+        const hist = getNoteHistory(prev.id);
+        hist.past.push(prev.blocks.map((b) => ({ ...b })));
+        if (hist.past.length > 50) hist.past.shift();
+        hist.future = [];
         const nextBlocks = updater(prev.blocks);
         return {
           ...prev,
@@ -283,9 +302,51 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           updatedAt: Date.now(),
         };
       });
+      setHistoryTick((t) => t + 1);
     },
-    [onUpdateNote]
+    [onUpdateNote, getNoteHistory]
   );
+
+  const handleUndo = useCallback(() => {
+    const hist = getNoteHistory(note.id);
+    if (hist.past.length === 0) return;
+    const previous = hist.past.pop()!;
+    hist.future.push(note.blocks.map((b) => ({ ...b })));
+    if (hist.future.length > 50) hist.future.shift();
+    onUpdateNote((prev) => ({
+      ...prev,
+      blocks: previous.length > 0 ? previous : [createBlock('paragraph', '')],
+      updatedAt: Date.now(),
+    }));
+    setHistoryTick((t) => t + 1);
+  }, [note.id, note.blocks, getNoteHistory, onUpdateNote]);
+
+  const handleRedo = useCallback(() => {
+    const hist = getNoteHistory(note.id);
+    if (hist.future.length === 0) return;
+    const next = hist.future.pop()!;
+    hist.past.push(note.blocks.map((b) => ({ ...b })));
+    if (hist.past.length > 50) hist.past.shift();
+    onUpdateNote((prev) => ({
+      ...prev,
+      blocks: next.length > 0 ? next : [createBlock('paragraph', '')],
+      updatedAt: Date.now(),
+    }));
+    setHistoryTick((t) => t + 1);
+  }, [note.id, note.blocks, getNoteHistory, onUpdateNote]);
+
+  const handleCopyNote = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(blocksToPlainText(note.title, note.blocks));
+      setCopiedNote(true);
+      setTimeout(() => setCopiedNote(false), 1800);
+    } catch {
+      /* ignore clipboard errors */
+    }
+  }, [note.title, note.blocks]);
+
+  const canUndo = (historyRef.current[note.id]?.past.length ?? 0) > 0;
+  const canRedo = (historyRef.current[note.id]?.future.length ?? 0) > 0;
 
   // ─── selection toolbar show ───────────────────────────────────────────────
 
@@ -322,7 +383,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
 
   /** Apply an inline format to the current selection using Range/execCommand fallback. */
   const applyInlineFormat = useCallback(
-    (tag: 'strong' | 'em' | 'code') => {
+    (tag: 'strong' | 'em' | 'u' | 'code') => {
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
       const range = sel.getRangeAt(0);
@@ -574,6 +635,27 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
         applyInlineFormat('em');
         return;
       }
+      // Ctrl/Cmd+U → underline
+      if (mod && e.key.toLowerCase() === 'u') {
+        e.preventDefault();
+        applyInlineFormat('u');
+        return;
+      }
+      // Ctrl/Cmd+Z → undo; Ctrl+Shift+Z / Cmd+Shift+Z / Ctrl+Y → redo
+      if (mod && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
       // Ctrl/Cmd+A → select all content in the note body
       if (mod && e.key.toLowerCase() === 'a') {
         e.preventDefault();
@@ -822,12 +904,17 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
     [note.blocks, toolbar.blockId]
   );
 
-  // Check if selection is bold/italic/code (for toolbar highlight)
-  const selectionFormats = useMemo<{ bold: boolean; italic: boolean; code: boolean }>(() => {
-    if (!toolbar.visible) return { bold: false, italic: false, code: false };
+  // Check if selection is bold/italic/underline/code (for toolbar highlight)
+  const selectionFormats = useMemo<{
+    bold: boolean;
+    italic: boolean;
+    underline: boolean;
+    code: boolean;
+  }>(() => {
+    if (!toolbar.visible) return { bold: false, italic: false, underline: false, code: false };
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0)
-      return { bold: false, italic: false, code: false };
+      return { bold: false, italic: false, underline: false, code: false };
     const range = sel.getRangeAt(0);
     const container = range.commonAncestorContainer;
     const el =
@@ -835,6 +922,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
     return {
       bold: !!el?.closest('strong'),
       italic: !!el?.closest('em'),
+      underline: !!el?.closest('u'),
       code: !!el?.closest('code'),
     };
   }, [toolbar]);
@@ -864,6 +952,46 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
       className="print-only-canvas relative h-full w-full overflow-y-auto cursor-text"
       style={{ backgroundColor: 'var(--bg-canvas)', perspective: '1200px' }}
     >
+      {/* Quiet top-right Undo / Redo / Copy Note bar */}
+      {!focusMode && (
+        <div
+          className="no-print sticky top-3 z-20 float-right mr-4 mt-3 flex items-center gap-0.5 rounded-lg px-1.5 py-1"
+          style={{
+            backgroundColor: 'var(--bg-canvas)',
+            border: '1px solid var(--border-hairline)',
+            color: 'var(--ink-muted)',
+          }}
+        >
+          <button
+            type="button"
+            title="Undo (Ctrl+Z / ⌘Z)"
+            disabled={!canUndo}
+            onClick={handleUndo}
+            className="rounded p-1 transition-colors hover:bg-black/5 disabled:opacity-30"
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            title="Redo (Ctrl+Y / ⌘⇧Z)"
+            disabled={!canRedo}
+            onClick={handleRedo}
+            className="rounded p-1 transition-colors hover:bg-black/5 disabled:opacity-30"
+          >
+            <Redo2 className="h-3.5 w-3.5" />
+          </button>
+          <div className="mx-0.5 h-3.5 w-px" style={{ backgroundColor: 'var(--border-hairline)' }} />
+          <button
+            type="button"
+            title="Copy note as text"
+            onClick={handleCopyNote}
+            className="rounded p-1 transition-colors hover:bg-black/5"
+            style={{ color: copiedNote ? 'var(--accent)' : 'var(--ink-muted)' }}
+          >
+            {copiedNote ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+          </button>
+        </div>
+      )}
       <motion.article
         key={`${note.id}-${unfoldKey}`}
         initial={{ opacity: 0, y: 14, rotateX: -4, scale: 0.985 }}
@@ -1212,14 +1340,16 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
             color: 'var(--ink-primary)',
           }}
         >
-          {(['h1', 'h2', 'paragraph'] as BlockType[]).map((headingType, i) => {
-            const label = i === 0 ? 'H1' : i === 1 ? 'H2' : 'P';
+          {(['h1', 'h2'] as BlockType[]).map((headingType, i) => {
+            const label = i === 0 ? 'H1' : 'H2';
             const isCurrent = activeToolbarBlock?.type === headingType;
             return (
               <button
                 key={label}
                 type="button"
-                onClick={() => convertBlockType(toolbar.blockId!, headingType)}
+                onClick={() =>
+                  convertBlockType(toolbar.blockId!, isCurrent ? 'paragraph' : headingType)
+                }
                 className="rounded-md px-2 py-1 text-[13px] font-medium transition-colors"
                 style={{
                   backgroundColor: isCurrent ? 'var(--accent-soft)' : 'transparent',
@@ -1255,6 +1385,19 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
             }}
           >
             <Italic className="h-3.5 w-3.5" />
+          </button>
+
+          <button
+            type="button"
+            title="Underline (Ctrl+U / ⌘U)"
+            onMouseDown={(e) => { e.preventDefault(); applyInlineFormat('u'); }}
+            className="rounded-md p-1.5 transition-colors hover:bg-black/5"
+            style={{
+              backgroundColor: selectionFormats.underline ? 'var(--accent-soft)' : 'transparent',
+              color: selectionFormats.underline ? 'var(--accent)' : 'var(--ink-primary)',
+            }}
+          >
+            <Underline className="h-3.5 w-3.5" />
           </button>
 
           <button
@@ -1295,15 +1438,6 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
             className="rounded-md p-1.5 transition-colors hover:bg-black/5"
           >
             <ListOrdered className="h-3.5 w-3.5" />
-          </button>
-
-          <button
-            type="button"
-            title="Checklist"
-            onClick={() => convertBlockType(toolbar.blockId!, 'checklist')}
-            className="rounded-md p-1.5 transition-colors hover:bg-black/5"
-          >
-            <MoreHorizontal className="h-3.5 w-3.5" />
           </button>
         </div>
       )}

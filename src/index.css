@@ -255,11 +255,20 @@ input:focus-visible {
 }
 
 /* Inline formatting styles inside contentEditable blocks */
+[contenteditable]:focus,
+[contenteditable]:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
 [contenteditable] strong {
   font-weight: 700;
 }
 [contenteditable] em {
   font-style: italic;
+}
+[contenteditable] u {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 [contenteditable] code {
   font-family: 'JetBrains Mono', monospace;
