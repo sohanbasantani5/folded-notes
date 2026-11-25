@@ -1,7 +1,6 @@
 import React, {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -51,7 +50,7 @@ interface SlashState {
 
 interface SelectionToolbarState {
   visible: boolean;
-  blockId: string | null;
+  blockIds: string[];
   top: number;
   left: number;
 }
@@ -67,7 +66,7 @@ const INITIAL_SLASH_STATE: SlashState = {
 
 const INITIAL_TOOLBAR_STATE: SelectionToolbarState = {
   visible: false,
-  blockId: null,
+  blockIds: [],
   top: 0,
   left: 0,
 };
@@ -91,7 +90,6 @@ function htmlToPlainText(html: string): string {
 
 /** Sanitise pasted / stored HTML to only allow safe inline formatting. */
 function sanitiseInlineHtml(html: string): string {
-  // Allow: strong, em, u, code, br, span. Strip everything else.
   return html
     .replace(/<(?!\/?(?:strong|em|u|code|br|span)[>\s])[^>]+>/gi, '')
     .replace(/<br\s*\/?>/gi, '\n');
@@ -102,11 +100,9 @@ function sanitiseInlineHtml(html: string): string {
  * contentEditable. Handles both legacy markdown and already-HTML content.
  */
 function contentToHtml(content: string): string {
-  // If content already contains HTML tags trust it (came from contentEditable)
   if (/<[a-z][\s\S]*>/i.test(content)) {
     return sanitiseInlineHtml(content);
   }
-  // Legacy plain-text / markdown → convert inline markers then escape bare &<>
   const escaped = content
     .replace(/&(?![a-z#0-9]+;)/gi, '&amp;')
     .replace(/</g, '&lt;')
@@ -114,12 +110,8 @@ function contentToHtml(content: string): string {
   return markdownInlineToHtml(escaped);
 }
 
-/**
- * Serialise a contentEditable div's innerHTML back to a storable string.
- * We keep it as HTML so round-trips are lossless.
- */
+/** Serialise a contentEditable block's innerHTML back to a storable string. */
 function getBlockHtml(el: HTMLElement): string {
-  // Replace <br> with \n so plain-text exports still work
   return el.innerHTML
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/&nbsp;/gi, ' ');
@@ -127,18 +119,17 @@ function getBlockHtml(el: HTMLElement): string {
 
 // ─── caret helpers ────────────────────────────────────────────────────────────
 
-/** Get the caret character offset inside a contentEditable element. */
 function getCaretOffset(el: HTMLElement): number {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return 0;
   const range = sel.getRangeAt(0);
+  if (!el.contains(range.startContainer)) return 0;
   const preRange = range.cloneRange();
   preRange.selectNodeContents(el);
   preRange.setEnd(range.startContainer, range.startOffset);
   return preRange.toString().length;
 }
 
-/** Set caret to a character offset inside a contentEditable element. */
 function setCaretOffset(el: HTMLElement, offset: number): void {
   const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
   let remaining = offset;
@@ -156,7 +147,6 @@ function setCaretOffset(el: HTMLElement, offset: number): void {
     }
     remaining -= len;
   }
-  // fallback: place at end
   const range = document.createRange();
   range.selectNodeContents(el);
   range.collapse(false);
@@ -165,22 +155,20 @@ function setCaretOffset(el: HTMLElement, offset: number): void {
   sel?.addRange(range);
 }
 
-/** Get the screen rect for the current selection mid-point. */
 function getSelectionMidRect(): DOMRect | null {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
   const range = sel.getRangeAt(0);
   const rects = range.getClientRects();
   if (rects.length === 0) return range.getBoundingClientRect();
-  // Return the rect of the last line so the toolbar appears above it
   return rects[rects.length - 1];
 }
 
-/** Get text inside a contentEditable before the caret position. */
 function getTextBeforeCaret(el: HTMLElement): string {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return '';
   const range = sel.getRangeAt(0);
+  if (!el.contains(range.startContainer)) return '';
   const preRange = range.cloneRange();
   preRange.selectNodeContents(el);
   preRange.setEnd(range.startContainer, range.startOffset);
@@ -204,25 +192,18 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
   const [copiedNote, setCopiedNote] = useState(false);
   const [, setHistoryTick] = useState(0);
 
-  const titleRef = useRef<HTMLTextAreaElement | null>(null);
-  // contentEditable divs keyed by block id
+  // Unified contentEditable document root
+  const docRootRef = useRef<HTMLDivElement | null>(null);
+  const titleRef = useRef<HTMLDivElement | null>(null);
   const blockRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  // pending focus: { blockId, caret? }
   const pendingFocusRef = useRef<{ blockId: string; caret?: number } | null>(null);
-  // Track whether a contentEditable input came from programmatic set (suppress re-render loop)
-  const suppressInputRef = useRef<Set<string>>(new Set());
+  const isComposingRef = useRef(false);
+  const suppressSyncRef = useRef(false);
+
   // Undo/Redo history stack per note (up to 50 snapshots)
   const historyRef = useRef<Record<string, { past: NoteBlock[][]; future: NoteBlock[][] }>>({});
 
   const filteredCommands = useMemo(() => filterSlashCommands(slash.query), [slash.query]);
-
-  // ── title auto-resize ────────────────────────────────────────────────────
-  useLayoutEffect(() => {
-    const el = titleRef.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight}px`;
-  }, [note.title, note.id]);
 
   // ── reset on note change ─────────────────────────────────────────────────
   useEffect(() => {
@@ -233,33 +214,48 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
     }
   }, [note.id]);
 
-  // ── sync contentEditable innerHTML when block content changes externally ──
+  // ── sync DOM from state when not actively typing/composing ───────────────
   useEffect(() => {
-    for (const block of note.blocks) {
-      const el = blockRefs.current[block.id];
-      if (!el) continue;
-      if (suppressInputRef.current.has(block.id)) {
-        suppressInputRef.current.delete(block.id);
-        continue;
-      }
-      const expected = contentToHtml(block.content);
-      if (el.innerHTML !== expected) {
-        const offset = getCaretOffset(el);
-        el.innerHTML = expected;
-        try { setCaretOffset(el, offset); } catch { /* ignore */ }
+    if (isComposingRef.current) return;
+    if (suppressSyncRef.current) {
+      suppressSyncRef.current = false;
+      return;
+    }
+
+    if (titleRef.current) {
+      const currentTitle = titleRef.current.textContent ?? '';
+      if (currentTitle !== note.title) {
+        titleRef.current.textContent = note.title;
       }
     }
-  }, [note.blocks]);
+
+    for (const block of note.blocks) {
+      if (block.type === 'divider') continue;
+      const el = blockRefs.current[block.id];
+      if (!el) continue;
+      const expected = contentToHtml(block.content);
+      if (el.innerHTML !== expected) {
+        el.innerHTML = expected;
+      }
+    }
+  }, [note.title, note.blocks]);
 
   // ── pending focus ─────────────────────────────────────────────────────────
   useEffect(() => {
     const pending = pendingFocusRef.current;
     if (!pending) return;
-    const el = blockRefs.current[pending.blockId];
+    const el =
+      pending.blockId === '__title__'
+        ? titleRef.current
+        : blockRefs.current[pending.blockId];
     if (el) {
-      el.focus();
+      docRootRef.current?.focus();
       if (typeof pending.caret === 'number') {
-        try { setCaretOffset(el, pending.caret); } catch { /* ignore */ }
+        try {
+          setCaretOffset(el, pending.caret);
+        } catch {
+          /* ignore */
+        }
       }
       setActiveBlockId(pending.blockId);
       pendingFocusRef.current = null;
@@ -277,7 +273,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
     return () => document.removeEventListener('mousedown', handleMouseDown);
   }, []);
 
-  // ─── update helpers ───────────────────────────────────────────────────────
+  // ─── history & update helpers ─────────────────────────────────────────────
 
   const closeSlashMenu = useCallback(() => setSlash(INITIAL_SLASH_STATE), []);
 
@@ -348,7 +344,29 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
   const canUndo = (historyRef.current[note.id]?.past.length ?? 0) > 0;
   const canRedo = (historyRef.current[note.id]?.future.length ?? 0) > 0;
 
-  // ─── selection toolbar show ───────────────────────────────────────────────
+  // ─── active block helper ──────────────────────────────────────────────────
+
+  const getCurrentBlockFromSelection = useCallback((): {
+    block: NoteBlock;
+    index: number;
+    el: HTMLDivElement;
+  } | null => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return null;
+    const node = sel.anchorNode;
+    if (!node) return null;
+    const blockEl = (
+      node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as HTMLElement)
+    )?.closest('[data-block-id]') as HTMLDivElement | null;
+    if (!blockEl) return null;
+    const id = blockEl.getAttribute('data-block-id');
+    if (!id) return null;
+    const index = note.blocks.findIndex((b) => b.id === id);
+    if (index === -1) return null;
+    return { block: note.blocks[index], index, el: blockEl };
+  }, [note.blocks]);
+
+  // ─── selection toolbar show (single or cross-block) ───────────────────────
 
   const handleSelectionChange = useCallback(() => {
     const sel = window.getSelection();
@@ -356,23 +374,28 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
       setToolbar((prev) => (prev.visible ? INITIAL_TOOLBAR_STATE : prev));
       return;
     }
-    // Find which block the selection is in
-    const anchorNode = sel.anchorNode;
-    let blockId: string | null = null;
-    for (const [id, el] of Object.entries(blockRefs.current)) {
-      if (el && el.contains(anchorNode)) {
-        blockId = id;
-        break;
+    const root = docRootRef.current;
+    if (!root || !root.contains(sel.anchorNode)) return;
+
+    const range = sel.getRangeAt(0);
+    const touchedIds: string[] = [];
+    for (const block of note.blocks) {
+      const el = blockRefs.current[block.id];
+      if (el && range.intersectsNode(el)) {
+        touchedIds.push(block.id);
       }
     }
-    if (!blockId) return;
+    if (touchedIds.length === 0) return;
 
     const rect = getSelectionMidRect();
     if (!rect) return;
-    const clampedLeft = Math.max(16, Math.min(window.innerWidth - 360, rect.left + rect.width / 2 - 160));
+    const clampedLeft = Math.max(
+      16,
+      Math.min(window.innerWidth - 360, rect.left + rect.width / 2 - 160)
+    );
     const clampedTop = Math.max(12, rect.top - 52);
-    setToolbar({ visible: true, blockId, top: clampedTop, left: clampedLeft });
-  }, []);
+    setToolbar({ visible: true, blockIds: touchedIds, top: clampedTop, left: clampedLeft });
+  }, [note.blocks]);
 
   useEffect(() => {
     document.addEventListener('selectionchange', handleSelectionChange);
@@ -381,65 +404,74 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
 
   // ─── rich-text formatting ─────────────────────────────────────────────────
 
-  /** Apply an inline format to the current selection using Range/execCommand fallback. */
+  const syncTouchedBlocksFromDom = useCallback(() => {
+    suppressSyncRef.current = true;
+    updateBlocks((bs) =>
+      bs.map((b) => {
+        const el = blockRefs.current[b.id];
+        if (!el || b.type === 'divider') return b;
+        const html = getBlockHtml(el);
+        return html !== b.content ? { ...b, content: html } : b;
+      })
+    );
+  }, [updateBlocks]);
+
   const applyInlineFormat = useCallback(
     (tag: 'strong' | 'em' | 'u' | 'code') => {
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
-      const range = sel.getRangeAt(0);
 
-      // Check if the selection is already wrapped in this tag
+      if (tag === 'strong' || tag === 'em' || tag === 'u') {
+        const cmd = tag === 'strong' ? 'bold' : tag === 'em' ? 'italic' : 'underline';
+        document.execCommand(cmd, false);
+        syncTouchedBlocksFromDom();
+        setToolbar(INITIAL_TOOLBAR_STATE);
+        return;
+      }
+
+      // Code inline wrap
+      const range = sel.getRangeAt(0);
       const container = range.commonAncestorContainer;
       const parentEl =
         container.nodeType === Node.TEXT_NODE ? container.parentElement : (container as HTMLElement);
-      const alreadyWrapped = parentEl?.closest(tag) !== null;
-
-      if (alreadyWrapped) {
-        // Unwrap: replace the parent tag with its inner content
-        const wrapper = parentEl!.closest(tag)!;
-        const fragment = document.createDocumentFragment();
-        while (wrapper.firstChild) fragment.appendChild(wrapper.firstChild);
-        wrapper.parentNode?.replaceChild(fragment, wrapper);
+      const existing = parentEl?.closest('code');
+      if (existing) {
+        const frag = document.createDocumentFragment();
+        while (existing.firstChild) frag.appendChild(existing.firstChild);
+        existing.parentNode?.replaceChild(frag, existing);
       } else {
-        // Wrap selection
-        const wrapper = document.createElement(tag);
+        const wrapper = document.createElement('code');
         try {
           range.surroundContents(wrapper);
         } catch {
-          // surroundContents fails on partial selections spanning elements — extract & wrap
           const extracted = range.extractContents();
           wrapper.appendChild(extracted);
           range.insertNode(wrapper);
         }
       }
-
-      // Persist to block state
-      if (toolbar.blockId) {
-        const el = blockRefs.current[toolbar.blockId];
-        if (el) {
-          suppressInputRef.current.add(toolbar.blockId);
-          const html = getBlockHtml(el);
-          updateBlocks((bs) =>
-            bs.map((b) => (b.id === toolbar.blockId ? { ...b, content: html } : b))
-          );
-        }
-      }
+      syncTouchedBlocksFromDom();
       setToolbar(INITIAL_TOOLBAR_STATE);
     },
-    [toolbar.blockId, updateBlocks]
+    [syncTouchedBlocksFromDom]
   );
 
-  const convertBlockType = useCallback(
-    (blockId: string, nextType: BlockType) => {
+  const convertBlocksType = useCallback(
+    (blockIds: string[], nextType: BlockType) => {
+      if (blockIds.length === 0) return;
+      const idSet = new Set(blockIds);
       updateBlocks((bs) =>
         bs.map((b) =>
-          b.id === blockId
-            ? { ...b, type: nextType, checked: nextType === 'checklist' ? Boolean(b.checked) : undefined }
+          idSet.has(b.id)
+            ? {
+                ...b,
+                type: nextType,
+                checked: nextType === 'checklist' ? Boolean(b.checked) : undefined,
+              }
             : b
         )
       );
       setToolbar(INITIAL_TOOLBAR_STATE);
-      pendingFocusRef.current = { blockId };
+      pendingFocusRef.current = { blockId: blockIds[0] };
     },
     [updateBlocks]
   );
@@ -500,10 +532,8 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
     [slash, updateBlocks, closeSlashMenu]
   );
 
-  // ─── input handler (contentEditable) ─────────────────────────────────────
-
   const detectSlashTrigger = useCallback(
-    (blockId: string, textBefore: string, el: HTMLDivElement) => {
+    (blockId: string, textBefore: string) => {
       const match = textBefore.match(/(?:^|\s)\/([a-zA-Z0-9-]*)$/);
       if (match) {
         const query = match[1] ?? '';
@@ -514,7 +544,14 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           const rect = sel.getRangeAt(0).getBoundingClientRect();
           pos = { top: rect.bottom + 6, left: rect.left };
         }
-        setSlash({ isOpen: true, blockId, slashIndex: slashPos, query, position: pos, selectedIndex: 0 });
+        setSlash({
+          isOpen: true,
+          blockId,
+          slashIndex: slashPos,
+          query,
+          position: pos,
+          selectedIndex: 0,
+        });
       } else if (slash.isOpen && slash.blockId === blockId) {
         closeSlashMenu();
       }
@@ -522,42 +559,69 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
     [slash.isOpen, slash.blockId, closeSlashMenu]
   );
 
-  const handleBlockInput = useCallback(
-    (block: NoteBlock, el: HTMLDivElement) => {
+  // ─── unified input handler ────────────────────────────────────────────────
+
+  const handleRootInput = useCallback(() => {
+    if (isComposingRef.current) return;
+
+    // Sync title if edited
+    if (titleRef.current) {
+      const domTitle = (titleRef.current.textContent ?? '').replace(/\n/g, '');
+      if (domTitle !== note.title) {
+        suppressSyncRef.current = true;
+        onUpdateNote((prev) => ({ ...prev, title: domTitle, updatedAt: Date.now() }));
+      }
+    }
+
+    const current = getCurrentBlockFromSelection();
+    if (current) {
+      const { block, el } = current;
       const html = getBlockHtml(el);
       const plainText = htmlToPlainText(html);
 
-      // Markdown shortcuts (only on plain-text paragraph blocks)
+      // Markdown shortcuts on paragraph blocks
       if (block.type === 'paragraph') {
         if (plainText === '# ') {
-          updateBlocks((bs) => bs.map((b) => (b.id === block.id ? { ...b, type: 'h1', content: '' } : b)));
+          updateBlocks((bs) =>
+            bs.map((b) => (b.id === block.id ? { ...b, type: 'h1', content: '' } : b))
+          );
           closeSlashMenu();
           return;
         }
         if (plainText === '## ') {
-          updateBlocks((bs) => bs.map((b) => (b.id === block.id ? { ...b, type: 'h2', content: '' } : b)));
+          updateBlocks((bs) =>
+            bs.map((b) => (b.id === block.id ? { ...b, type: 'h2', content: '' } : b))
+          );
           closeSlashMenu();
           return;
         }
         if (plainText === '- ' || plainText === '* ') {
-          updateBlocks((bs) => bs.map((b) => (b.id === block.id ? { ...b, type: 'bullet', content: '' } : b)));
+          updateBlocks((bs) =>
+            bs.map((b) => (b.id === block.id ? { ...b, type: 'bullet', content: '' } : b))
+          );
           closeSlashMenu();
           return;
         }
         if (plainText === '1. ') {
-          updateBlocks((bs) => bs.map((b) => (b.id === block.id ? { ...b, type: 'numbered', content: '' } : b)));
+          updateBlocks((bs) =>
+            bs.map((b) => (b.id === block.id ? { ...b, type: 'numbered', content: '' } : b))
+          );
           closeSlashMenu();
           return;
         }
         if (plainText === '[] ' || plainText === '[ ] ') {
           updateBlocks((bs) =>
-            bs.map((b) => (b.id === block.id ? { ...b, type: 'checklist', content: '', checked: false } : b))
+            bs.map((b) =>
+              b.id === block.id ? { ...b, type: 'checklist', content: '', checked: false } : b
+            )
           );
           closeSlashMenu();
           return;
         }
         if (plainText === '> ') {
-          updateBlocks((bs) => bs.map((b) => (b.id === block.id ? { ...b, type: 'callout', content: '' } : b)));
+          updateBlocks((bs) =>
+            bs.map((b) => (b.id === block.id ? { ...b, type: 'callout', content: '' } : b))
+          );
           closeSlashMenu();
           return;
         }
@@ -576,79 +640,46 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
         }
       }
 
-      suppressInputRef.current.add(block.id);
-      updateBlocks((bs) => bs.map((b) => (b.id === block.id ? { ...b, content: html } : b)));
-
       const textBefore = getTextBeforeCaret(el);
-      detectSlashTrigger(block.id, textBefore, el);
-    },
-    [updateBlocks, detectSlashTrigger, closeSlashMenu]
-  );
+      detectSlashTrigger(block.id, textBefore);
+    }
 
-  // ─── keydown handler (contentEditable) ───────────────────────────────────
+    syncTouchedBlocksFromDom();
+  }, [
+    note.title,
+    onUpdateNote,
+    getCurrentBlockFromSelection,
+    updateBlocks,
+    closeSlashMenu,
+    detectSlashTrigger,
+    syncTouchedBlocksFromDom,
+  ]);
 
-  const focusAdjacentTextBlock = useCallback(
-    (currentIndex: number, direction: -1 | 1) => {
-      let cursor = currentIndex + direction;
-      while (cursor >= 0 && cursor < note.blocks.length) {
-        const candidate = note.blocks[cursor];
-        if (candidate.type !== 'divider') {
-          const el = blockRefs.current[candidate.id];
-          if (el) {
-            el.focus();
-            if (direction === -1) {
-              setCaretOffset(el, el.textContent?.length ?? 0);
-            } else {
-              setCaretOffset(el, 0);
-            }
-            setActiveBlockId(candidate.id);
-          }
-          return true;
-        }
-        cursor += direction;
-      }
-      if (direction === -1 && titleRef.current) {
-        titleRef.current.focus();
-        const len = titleRef.current.value.length;
-        titleRef.current.setSelectionRange(len, len);
-        return true;
-      }
-      return false;
-    },
-    [note.blocks]
-  );
+  // ─── unified keydown handler ──────────────────────────────────────────────
 
-  const handleBlockKeyDown = useCallback(
-    (block: NoteBlock, index: number, e: React.KeyboardEvent<HTMLDivElement>) => {
+  const handleRootKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
       const mod = e.metaKey || e.ctrlKey;
-      const el = e.currentTarget;
 
-      // Ctrl/Cmd+B → bold
       if (mod && e.key.toLowerCase() === 'b') {
         e.preventDefault();
         applyInlineFormat('strong');
         return;
       }
-      // Ctrl/Cmd+I → italic
       if (mod && e.key.toLowerCase() === 'i') {
         e.preventDefault();
         applyInlineFormat('em');
         return;
       }
-      // Ctrl/Cmd+U → underline
       if (mod && e.key.toLowerCase() === 'u') {
         e.preventDefault();
         applyInlineFormat('u');
         return;
       }
-      // Ctrl/Cmd+Z → undo; Ctrl+Shift+Z / Cmd+Shift+Z / Ctrl+Y → redo
       if (mod && e.key.toLowerCase() === 'z') {
         e.preventDefault();
-        if (e.shiftKey) {
-          handleRedo();
-        } else {
-          handleUndo();
-        }
+        if (e.shiftKey) handleRedo();
+        else handleUndo();
         return;
       }
       if (mod && e.key.toLowerCase() === 'y') {
@@ -656,21 +687,11 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
         handleRedo();
         return;
       }
-      // Ctrl/Cmd+A → select all content in the note body
       if (mod && e.key.toLowerCase() === 'a') {
         e.preventDefault();
-        // Find the blocks container and select all
-        const container = el.closest('.folded-blocks-container') as HTMLElement | null;
-        if (container) {
+        if (docRootRef.current) {
           const range = document.createRange();
-          range.selectNodeContents(container);
-          const sel = window.getSelection();
-          sel?.removeAllRanges();
-          sel?.addRange(range);
-        } else {
-          // Fallback: select within current block
-          const range = document.createRange();
-          range.selectNodeContents(el);
+          range.selectNodeContents(docRootRef.current);
           const sel = window.getSelection();
           sel?.removeAllRanges();
           sel?.addRange(range);
@@ -679,11 +700,14 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
       }
 
       // Slash menu navigation
-      if (slash.isOpen && slash.blockId === block.id) {
+      if (slash.isOpen && slash.blockId) {
         if (e.key === 'ArrowDown') {
           e.preventDefault();
           if (filteredCommands.length > 0) {
-            setSlash((prev) => ({ ...prev, selectedIndex: (prev.selectedIndex + 1) % filteredCommands.length }));
+            setSlash((prev) => ({
+              ...prev,
+              selectedIndex: (prev.selectedIndex + 1) % filteredCommands.length,
+            }));
           }
           return;
         }
@@ -692,7 +716,8 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           if (filteredCommands.length > 0) {
             setSlash((prev) => ({
               ...prev,
-              selectedIndex: (prev.selectedIndex - 1 + filteredCommands.length) % filteredCommands.length,
+              selectedIndex:
+                (prev.selectedIndex - 1 + filteredCommands.length) % filteredCommands.length,
             }));
           }
           return;
@@ -712,10 +737,31 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
         }
       }
 
+      // Check if caret is in Title
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && titleRef.current?.contains(sel.anchorNode)) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          const firstText = note.blocks.find((b) => b.type !== 'divider');
+          if (firstText) {
+            pendingFocusRef.current = { blockId: firstText.id, caret: 0 };
+            const el = blockRefs.current[firstText.id];
+            if (el) {
+              setCaretOffset(el, 0);
+              setActiveBlockId(firstText.id);
+              pendingFocusRef.current = null;
+            }
+          }
+        }
+        return;
+      }
+
+      const current = getCurrentBlockFromSelection();
+      if (!current) return;
+      const { block, index, el } = current;
       const plainText = el.textContent ?? '';
       const caretOffset = getCaretOffset(el);
 
-      // Enter → split block
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         const isList =
@@ -723,13 +769,13 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
 
         if (isList && plainText.trim() === '') {
           updateBlocks((bs) =>
-            bs.map((b) => (b.id === block.id ? { ...b, type: 'paragraph', checked: undefined } : b))
+            bs.map((b) =>
+              b.id === block.id ? { ...b, type: 'paragraph', checked: undefined } : b
+            )
           );
           return;
         }
 
-        const html = getBlockHtml(el);
-        // Split at caret: use plain text positions for simplicity (rich text in content after split)
         const beforeText = plainText.slice(0, caretOffset);
         const afterText = plainText.slice(caretOffset);
         const nextType: BlockType = isList ? block.type : 'paragraph';
@@ -745,15 +791,15 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
         return;
       }
 
-      // Backspace at start → merge or convert
       if (e.key === 'Backspace' && caretOffset === 0) {
-        const sel = window.getSelection();
-        if (sel && !sel.isCollapsed) return; // let browser handle selection delete
+        if (sel && !sel.isCollapsed) return; // let browser delete multi-block selection
 
         if (block.type !== 'paragraph') {
           e.preventDefault();
           updateBlocks((bs) =>
-            bs.map((b) => (b.id === block.id ? { ...b, type: 'paragraph', checked: undefined } : b))
+            bs.map((b) =>
+              b.id === block.id ? { ...b, type: 'paragraph', checked: undefined } : b
+            )
           );
           return;
         }
@@ -767,8 +813,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           }
           const prevPlain = htmlToPlainText(prevBlock.content);
           const mergeCaret = prevPlain.length;
-          const curHtml = getBlockHtml(el);
-          const curPlain = htmlToPlainText(curHtml);
+          const curPlain = htmlToPlainText(getBlockHtml(el));
           updateBlocks((bs) => {
             const copy = [...bs];
             copy[index - 1] = { ...prevBlock, content: prevPlain + curPlain };
@@ -777,41 +822,34 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           });
           pendingFocusRef.current = { blockId: prevBlock.id, caret: mergeCaret };
         }
-        return;
-      }
-
-      // Arrow navigation between blocks
-      if (e.key === 'ArrowUp' && caretOffset === 0) {
-        e.preventDefault();
-        focusAdjacentTextBlock(index, -1);
-        return;
-      }
-      if (e.key === 'ArrowDown' && caretOffset === plainText.length) {
-        e.preventDefault();
-        focusAdjacentTextBlock(index, 1);
       }
     },
     [
+      applyInlineFormat,
+      handleUndo,
+      handleRedo,
       slash,
       filteredCommands,
       applySlashCommand,
-      applyInlineFormat,
       closeSlashMenu,
-      updateBlocks,
       note.blocks,
-      focusAdjacentTextBlock,
+      getCurrentBlockFromSelection,
+      updateBlocks,
     ]
   );
 
   // ─── paste handler ─────────────────────────────────────────────────────────
 
-  const handleBlockPaste = useCallback(
-    (block: NoteBlock, index: number, e: React.ClipboardEvent<HTMLDivElement>) => {
+  const handleRootPaste = useCallback(
+    (e: React.ClipboardEvent<HTMLDivElement>) => {
       const pasted = e.clipboardData.getData('text/plain');
-      if (!pasted || !pasted.includes('\n')) return; // let browser handle single-line paste
+      if (!pasted || !pasted.includes('\n')) return;
+
+      const current = getCurrentBlockFromSelection();
+      if (!current) return;
 
       e.preventDefault();
-      const el = e.currentTarget;
+      const { block, index, el } = current;
       const caretOffset = getCaretOffset(el);
       const plainText = el.textContent ?? '';
       const prefix = plainText.slice(0, caretOffset);
@@ -846,7 +884,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
         caret: mergedLast.content.length - suffix.length,
       };
     },
-    [updateBlocks]
+    [getCurrentBlockFromSelection, updateBlocks]
   );
 
   // ─── canvas click (click anywhere → focus last block) ────────────────────
@@ -862,7 +900,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
       }
       const el = blockRefs.current[blockToFocus.id];
       if (el) {
-        el.focus();
+        docRootRef.current?.focus();
         setCaretOffset(el, el.textContent?.length ?? 0);
         setActiveBlockId(blockToFocus.id);
       }
@@ -873,7 +911,11 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
   const handleCanvasClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const target = e.target as HTMLElement | null;
-      if (target?.closest('[contenteditable], textarea, button, input, a, [data-selection-toolbar="true"]')) {
+      if (
+        target?.closest(
+          '[data-block-id], [data-role="title"], button, input, a, [data-selection-toolbar="true"]'
+        )
+      ) {
         return;
       }
       const sel = window.getSelection();
@@ -899,12 +941,11 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
     return map;
   }, [note.blocks]);
 
-  const activeToolbarBlock = useMemo(
-    () => note.blocks.find((b) => b.id === toolbar.blockId) ?? null,
-    [note.blocks, toolbar.blockId]
+  const toolbarBlocks = useMemo(
+    () => note.blocks.filter((b) => toolbar.blockIds.includes(b.id)),
+    [note.blocks, toolbar.blockIds]
   );
 
-  // Check if selection is bold/italic/underline/code (for toolbar highlight)
   const selectionFormats = useMemo<{
     bold: boolean;
     italic: boolean;
@@ -920,16 +961,13 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
     const el =
       container.nodeType === Node.TEXT_NODE ? container.parentElement : (container as HTMLElement);
     return {
-      bold: !!el?.closest('strong'),
-      italic: !!el?.closest('em'),
+      bold: !!el?.closest('strong, b'),
+      italic: !!el?.closest('em, i'),
       underline: !!el?.closest('u'),
       code: !!el?.closest('code'),
     };
   }, [toolbar]);
 
-  // ─── contentEditable ref helper ───────────────────────────────────────────
-
-  /** Create a ref callback that sets the initial innerHTML and stores the ref. */
   const makeBlockRef = useCallback(
     (block: NoteBlock) => (el: HTMLDivElement | null) => {
       blockRefs.current[block.id] = el;
@@ -940,9 +978,6 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
     []
   );
 
-  // ─── render ───────────────────────────────────────────────────────────────
-
-  /** Shared contentEditable class and style for each block type. */
   const ceBase =
     'folio-editor-font block w-full outline-none bg-transparent empty:before:opacity-35 empty:before:content-[attr(data-placeholder)] empty:before:pointer-events-none empty:before:select-none';
 
@@ -992,6 +1027,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           </button>
         </div>
       )}
+
       <motion.article
         key={`${note.id}-${unfoldKey}`}
         initial={{ opacity: 0, y: 14, rotateX: -4, scale: 0.985 }}
@@ -1007,314 +1043,268 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           transformOrigin: 'top center',
         }}
       >
-        {/* Title */}
-        <textarea
-          ref={titleRef}
-          rows={1}
-          value={note.title}
-          placeholder="Untitled Note"
-          aria-label="Note title"
-          onFocus={() => setActiveBlockId('__title__')}
-          onChange={(e) => {
-            const val = e.target.value.replace(/\n/g, '');
-            onUpdateNote((prev) => ({ ...prev, title: val, updatedAt: Date.now() }));
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === 'ArrowDown') {
-              e.preventDefault();
-              const firstText = note.blocks.find((b) => b.type !== 'divider');
-              if (firstText) {
-                const el = blockRefs.current[firstText.id];
-                if (el) {
-                  el.focus();
-                  setCaretOffset(el, 0);
-                  setActiveBlockId(firstText.id);
-                }
-              }
-            }
-          }}
-          className="folio-editor-font w-full resize-none overflow-hidden bg-transparent text-[30px] sm:text-[34px] font-semibold leading-[1.22] tracking-[-0.025em] outline-none placeholder:opacity-35"
-          style={{
-            color: 'var(--ink-primary)',
-            textWrap: 'balance',
-            opacity: focusMode && activeBlockId && activeBlockId !== '__title__' ? 0.32 : 1,
-            transition: 'opacity 280ms cubic-bezier(0.22, 1, 0.36, 1)',
-          }}
-        />
-
-        {/* Meta row */}
+        {/* Single unified contentEditable document surface (Title + All Blocks) */}
         <div
-          className="no-print mt-2.5 mb-8 flex items-center gap-2 text-[12px]"
-          style={{
-            color: 'var(--ink-muted)',
-            opacity: focusMode ? 0 : 1,
-            transition: 'opacity 280ms cubic-bezier(0.22, 1, 0.36, 1)',
+          ref={docRootRef}
+          contentEditable
+          suppressContentEditableWarning
+          onInput={handleRootInput}
+          onKeyDown={handleRootKeyDown}
+          onPaste={handleRootPaste}
+          onCompositionStart={() => {
+            isComposingRef.current = true;
           }}
+          onCompositionEnd={() => {
+            isComposingRef.current = false;
+            handleRootInput();
+          }}
+          className="outline-none"
+          style={{ userSelect: 'text' }}
         >
-          <span>Edited {formatRelativeDate(note.updatedAt)}</span>
-          <span aria-hidden="true">·</span>
-          <span>Type / for commands</span>
-        </div>
-
-        {/* Blocks */}
-        <div className="space-y-2.5 folded-blocks-container">
-          {note.blocks.map((block, idx) => {
-            const isActive = activeBlockId === block.id;
-            const dimmed = focusMode && activeBlockId !== null && !isActive;
-            const dimStyle = {
-              opacity: dimmed ? 0.22 : 1,
+          {/* Title */}
+          <div
+            ref={(el) => {
+              titleRef.current = el;
+              if (el && el.textContent === '' && note.title) {
+                el.textContent = note.title;
+              }
+            }}
+            data-role="title"
+            data-placeholder="Untitled Note"
+            aria-label="Note title"
+            onFocus={() => setActiveBlockId('__title__')}
+            className="folio-editor-font w-full bg-transparent text-[30px] sm:text-[34px] font-semibold leading-[1.22] tracking-[-0.025em] outline-none empty:before:opacity-35 empty:before:content-[attr(data-placeholder)]"
+            style={{
+              color: 'var(--ink-primary)',
+              textWrap: 'balance',
+              opacity: focusMode && activeBlockId && activeBlockId !== '__title__' ? 0.32 : 1,
               transition: 'opacity 280ms cubic-bezier(0.22, 1, 0.36, 1)',
-            };
+            }}
+          />
 
-            // ── divider ──
-            if (block.type === 'divider') {
-              return (
-                <div
-                  key={block.id}
-                  className="group relative flex items-center py-4"
-                  style={dimStyle}
-                >
-                  <hr
-                    className="print-divider w-full border-0"
-                    style={{ height: '1px', backgroundColor: 'var(--border-strong)' }}
-                  />
-                  <button
-                    type="button"
-                    aria-label="Remove divider"
-                    onClick={() => updateBlocks((bs) => bs.filter((b) => b.id !== block.id))}
-                    className="no-print absolute right-0 rounded-md p-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-visible:opacity-100"
-                    style={{ backgroundColor: 'var(--bg-canvas)', color: 'var(--ink-muted)' }}
+          {/* Meta row (non-editable) */}
+          <div
+            contentEditable={false}
+            className="no-print mt-2.5 mb-8 flex items-center gap-2 text-[12px] select-none"
+            style={{
+              color: 'var(--ink-muted)',
+              opacity: focusMode ? 0 : 1,
+              transition: 'opacity 280ms cubic-bezier(0.22, 1, 0.36, 1)',
+            }}
+          >
+            <span>Edited {formatRelativeDate(note.updatedAt)}</span>
+            <span aria-hidden="true">·</span>
+            <span>Type / for commands</span>
+          </div>
+
+          {/* Blocks */}
+          <div className="space-y-2.5 folded-blocks-container">
+            {note.blocks.map((block, idx) => {
+              const isActive = activeBlockId === block.id;
+              const dimmed = focusMode && activeBlockId !== null && !isActive;
+              const dimStyle = {
+                opacity: dimmed ? 0.22 : 1,
+                transition: 'opacity 280ms cubic-bezier(0.22, 1, 0.36, 1)',
+              };
+
+              if (block.type === 'divider') {
+                return (
+                  <div
+                    key={block.id}
+                    contentEditable={false}
+                    className="group relative flex items-center py-4 select-none"
+                    style={dimStyle}
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              );
-            }
+                    <hr
+                      className="print-divider w-full border-0"
+                      style={{ height: '1px', backgroundColor: 'var(--border-strong)' }}
+                    />
+                    <button
+                      type="button"
+                      aria-label="Remove divider"
+                      onClick={() => updateBlocks((bs) => bs.filter((b) => b.id !== block.id))}
+                      className="no-print absolute right-0 rounded-md p-1 opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-visible:opacity-100"
+                      style={{ backgroundColor: 'var(--bg-canvas)', color: 'var(--ink-muted)' }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                );
+              }
 
-            // ── callout ──
-            if (block.type === 'callout') {
-              return (
-                <div
-                  key={block.id}
-                  className="print-callout relative my-3 rounded-xl px-5 py-4"
-                  style={{
-                    backgroundColor: 'var(--bg-callout)',
-                    border: '1px solid var(--border-hairline)',
-                    ...dimStyle,
-                  }}
-                >
-                  <div className="flex items-start gap-3">
+              if (block.type === 'callout') {
+                return (
+                  <div
+                    key={block.id}
+                    className="print-callout relative my-3 rounded-xl px-5 py-4"
+                    style={{
+                      backgroundColor: 'var(--bg-callout)',
+                      border: '1px solid var(--border-hairline)',
+                      ...dimStyle,
+                    }}
+                  >
+                    <div className="flex items-start gap-3">
+                      <span
+                        contentEditable={false}
+                        aria-hidden="true"
+                        className="select-none font-serif text-xl leading-none pt-0.5"
+                        style={{ color: 'var(--accent)' }}
+                      >
+                        "
+                      </span>
+                      <div
+                        ref={makeBlockRef(block)}
+                        data-block-id={block.id}
+                        data-placeholder="Write a callout or excerpt..."
+                        aria-label="Callout block"
+                        onFocus={() => setActiveBlockId(block.id)}
+                        className={`${ceBase} text-[15.5px] italic`}
+                        style={{ color: 'var(--ink-primary)' }}
+                      />
+                    </div>
+                  </div>
+                );
+              }
+
+              if (block.type === 'checklist') {
+                return (
+                  <div key={block.id} className="flex items-start gap-3 py-0.5" style={dimStyle}>
+                    <button
+                      type="button"
+                      contentEditable={false}
+                      role="checkbox"
+                      aria-checked={Boolean(block.checked)}
+                      aria-label="Toggle checklist item"
+                      onClick={() =>
+                        updateBlocks((bs) =>
+                          bs.map((b) => (b.id === block.id ? { ...b, checked: !b.checked } : b))
+                        )
+                      }
+                      className="mt-[5px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] transition-colors duration-200"
+                      style={{
+                        backgroundColor: block.checked ? 'var(--accent)' : 'transparent',
+                        border: `1.5px solid ${
+                          block.checked ? 'var(--accent)' : 'var(--border-strong)'
+                        }`,
+                        color: 'var(--accent-ink)',
+                      }}
+                    >
+                      {block.checked && <Check className="h-3 w-3" strokeWidth={2.5} />}
+                    </button>
+                    <div
+                      ref={makeBlockRef(block)}
+                      data-block-id={block.id}
+                      data-placeholder="Checklist item..."
+                      aria-label="Checklist item"
+                      onFocus={() => setActiveBlockId(block.id)}
+                      className={`${ceBase} text-[16px] ${block.checked ? 'line-through' : ''}`}
+                      style={{
+                        color: block.checked ? 'var(--ink-muted)' : 'var(--ink-primary)',
+                      }}
+                    />
+                  </div>
+                );
+              }
+
+              if (block.type === 'bullet') {
+                return (
+                  <div key={block.id} className="flex items-start gap-3 py-0.5" style={dimStyle}>
                     <span
+                      contentEditable={false}
                       aria-hidden="true"
-                      className="select-none font-serif text-xl leading-none pt-0.5"
+                      className="mt-[2px] w-4 shrink-0 select-none text-center text-[16px]"
                       style={{ color: 'var(--accent)' }}
                     >
-                      "
+                      •
                     </span>
                     <div
                       ref={makeBlockRef(block)}
-                      contentEditable
-                      suppressContentEditableWarning
-                      data-placeholder="Write a callout or excerpt..."
-                      aria-label="Callout block"
+                      data-block-id={block.id}
+                      data-placeholder="List item..."
+                      aria-label="Bullet list item"
                       onFocus={() => setActiveBlockId(block.id)}
-                      onInput={() => {
-                        const el = blockRefs.current[block.id];
-                        if (el) handleBlockInput(block, el);
-                      }}
-                      onKeyDown={(e) => handleBlockKeyDown(block, idx, e)}
-                      onPaste={(e) => handleBlockPaste(block, idx, e)}
-                      className={`${ceBase} text-[15.5px] italic placeholder:opacity-40`}
+                      className={`${ceBase} text-[16px]`}
                       style={{ color: 'var(--ink-primary)' }}
                     />
                   </div>
-                </div>
-              );
-            }
+                );
+              }
 
-            // ── checklist ──
-            if (block.type === 'checklist') {
+              if (block.type === 'numbered') {
+                return (
+                  <div key={block.id} className="flex items-start gap-3 py-0.5" style={dimStyle}>
+                    <span
+                      contentEditable={false}
+                      aria-hidden="true"
+                      className="mt-[2px] min-w-[20px] shrink-0 select-none text-right font-mono text-[13.5px] tabular-nums"
+                      style={{ color: 'var(--ink-muted)' }}
+                    >
+                      {numberedIndices[block.id] ?? 1}.
+                    </span>
+                    <div
+                      ref={makeBlockRef(block)}
+                      data-block-id={block.id}
+                      data-placeholder="Numbered item..."
+                      aria-label="Numbered list item"
+                      onFocus={() => setActiveBlockId(block.id)}
+                      className={`${ceBase} text-[16px]`}
+                      style={{ color: 'var(--ink-primary)' }}
+                    />
+                  </div>
+                );
+              }
+
+              if (block.type === 'h1') {
+                return (
+                  <div key={block.id} className="pt-5 pb-1" style={dimStyle}>
+                    <div
+                      ref={makeBlockRef(block)}
+                      data-block-id={block.id}
+                      data-placeholder="Heading 1"
+                      aria-label="Heading 1"
+                      onFocus={() => setActiveBlockId(block.id)}
+                      className={`${ceBase} text-[24px] font-semibold leading-[1.3] tracking-[-0.02em]`}
+                      style={{ color: 'var(--ink-primary)' }}
+                    />
+                  </div>
+                );
+              }
+
+              if (block.type === 'h2') {
+                return (
+                  <div key={block.id} className="pt-4 pb-0.5" style={dimStyle}>
+                    <div
+                      ref={makeBlockRef(block)}
+                      data-block-id={block.id}
+                      data-placeholder="Heading 2"
+                      aria-label="Heading 2"
+                      onFocus={() => setActiveBlockId(block.id)}
+                      className={`${ceBase} text-[19px] font-semibold leading-[1.38] tracking-[-0.015em]`}
+                      style={{ color: 'var(--ink-primary)' }}
+                    />
+                  </div>
+                );
+              }
+
               return (
-                <div
-                  key={block.id}
-                  className="flex items-start gap-3 py-0.5"
-                  style={dimStyle}
-                >
-                  <button
-                    type="button"
-                    role="checkbox"
-                    aria-checked={Boolean(block.checked)}
-                    aria-label="Toggle checklist item"
-                    onClick={() =>
-                      updateBlocks((bs) =>
-                        bs.map((b) => (b.id === block.id ? { ...b, checked: !b.checked } : b))
-                      )
+                <div key={block.id} className="py-0.5" style={dimStyle}>
+                  <div
+                    ref={makeBlockRef(block)}
+                    data-block-id={block.id}
+                    data-placeholder={
+                      idx === 0 && note.blocks.length === 1
+                        ? 'Begin writing, or type "/" for commands...'
+                        : ''
                     }
-                    className="mt-[5px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] transition-colors duration-200"
-                    style={{
-                      backgroundColor: block.checked ? 'var(--accent)' : 'transparent',
-                      border: `1.5px solid ${block.checked ? 'var(--accent)' : 'var(--border-strong)'}`,
-                      color: 'var(--accent-ink)',
-                    }}
-                  >
-                    {block.checked && <Check className="h-3 w-3" strokeWidth={2.5} />}
-                  </button>
-                  <div
-                    ref={makeBlockRef(block)}
-                    contentEditable
-                    suppressContentEditableWarning
-                    data-placeholder="Checklist item..."
-                    aria-label="Checklist item"
+                    aria-label="Paragraph"
                     onFocus={() => setActiveBlockId(block.id)}
-                    onInput={() => {
-                      const el = blockRefs.current[block.id];
-                      if (el) handleBlockInput(block, el);
-                    }}
-                    onKeyDown={(e) => handleBlockKeyDown(block, idx, e)}
-                    onPaste={(e) => handleBlockPaste(block, idx, e)}
-                    className={`${ceBase} text-[16px] placeholder:opacity-35 ${block.checked ? 'line-through' : ''}`}
-                    style={{ color: block.checked ? 'var(--ink-muted)' : 'var(--ink-primary)' }}
-                  />
-                </div>
-              );
-            }
-
-            // ── bullet ──
-            if (block.type === 'bullet') {
-              return (
-                <div key={block.id} className="flex items-start gap-3 py-0.5" style={dimStyle}>
-                  <span
-                    aria-hidden="true"
-                    className="mt-[2px] w-4 shrink-0 select-none text-center text-[16px]"
-                    style={{ color: 'var(--accent)' }}
-                  >
-                    •
-                  </span>
-                  <div
-                    ref={makeBlockRef(block)}
-                    contentEditable
-                    suppressContentEditableWarning
-                    data-placeholder="List item..."
-                    aria-label="Bullet list item"
-                    onFocus={() => setActiveBlockId(block.id)}
-                    onInput={() => {
-                      const el = blockRefs.current[block.id];
-                      if (el) handleBlockInput(block, el);
-                    }}
-                    onKeyDown={(e) => handleBlockKeyDown(block, idx, e)}
-                    onPaste={(e) => handleBlockPaste(block, idx, e)}
-                    className={`${ceBase} text-[16px] placeholder:opacity-35`}
+                    className={`${ceBase} text-[16px]`}
                     style={{ color: 'var(--ink-primary)' }}
                   />
                 </div>
               );
-            }
-
-            // ── numbered ──
-            if (block.type === 'numbered') {
-              return (
-                <div key={block.id} className="flex items-start gap-3 py-0.5" style={dimStyle}>
-                  <span
-                    aria-hidden="true"
-                    className="mt-[2px] min-w-[20px] shrink-0 select-none text-right font-mono text-[13.5px] tabular-nums"
-                    style={{ color: 'var(--ink-muted)' }}
-                  >
-                    {numberedIndices[block.id] ?? 1}.
-                  </span>
-                  <div
-                    ref={makeBlockRef(block)}
-                    contentEditable
-                    suppressContentEditableWarning
-                    data-placeholder="Numbered item..."
-                    aria-label="Numbered list item"
-                    onFocus={() => setActiveBlockId(block.id)}
-                    onInput={() => {
-                      const el = blockRefs.current[block.id];
-                      if (el) handleBlockInput(block, el);
-                    }}
-                    onKeyDown={(e) => handleBlockKeyDown(block, idx, e)}
-                    onPaste={(e) => handleBlockPaste(block, idx, e)}
-                    className={`${ceBase} text-[16px] placeholder:opacity-35`}
-                    style={{ color: 'var(--ink-primary)' }}
-                  />
-                </div>
-              );
-            }
-
-            // ── h1 ──
-            if (block.type === 'h1') {
-              return (
-                <div key={block.id} className="pt-5 pb-1" style={dimStyle}>
-                  <div
-                    ref={makeBlockRef(block)}
-                    contentEditable
-                    suppressContentEditableWarning
-                    data-placeholder="Heading 1"
-                    aria-label="Heading 1"
-                    onFocus={() => setActiveBlockId(block.id)}
-                    onInput={() => {
-                      const el = blockRefs.current[block.id];
-                      if (el) handleBlockInput(block, el);
-                    }}
-                    onKeyDown={(e) => handleBlockKeyDown(block, idx, e)}
-                    onPaste={(e) => handleBlockPaste(block, idx, e)}
-                    className={`${ceBase} text-[24px] font-semibold leading-[1.3] tracking-[-0.02em] placeholder:opacity-35`}
-                    style={{ color: 'var(--ink-primary)' }}
-                  />
-                </div>
-              );
-            }
-
-            // ── h2 ──
-            if (block.type === 'h2') {
-              return (
-                <div key={block.id} className="pt-4 pb-0.5" style={dimStyle}>
-                  <div
-                    ref={makeBlockRef(block)}
-                    contentEditable
-                    suppressContentEditableWarning
-                    data-placeholder="Heading 2"
-                    aria-label="Heading 2"
-                    onFocus={() => setActiveBlockId(block.id)}
-                    onInput={() => {
-                      const el = blockRefs.current[block.id];
-                      if (el) handleBlockInput(block, el);
-                    }}
-                    onKeyDown={(e) => handleBlockKeyDown(block, idx, e)}
-                    onPaste={(e) => handleBlockPaste(block, idx, e)}
-                    className={`${ceBase} text-[19px] font-semibold leading-[1.38] tracking-[-0.015em] placeholder:opacity-35`}
-                    style={{ color: 'var(--ink-primary)' }}
-                  />
-                </div>
-              );
-            }
-
-            // ── paragraph (default) ──
-            return (
-              <div key={block.id} className="py-0.5" style={dimStyle}>
-                <div
-                  ref={makeBlockRef(block)}
-                  contentEditable
-                  suppressContentEditableWarning
-                  data-placeholder={
-                    idx === 0 && note.blocks.length === 1
-                      ? 'Begin writing, or type "/" for commands...'
-                      : ''
-                  }
-                  aria-label="Paragraph"
-                  onFocus={() => setActiveBlockId(block.id)}
-                  onInput={() => {
-                    const el = blockRefs.current[block.id];
-                    if (el) handleBlockInput(block, el);
-                  }}
-                  onKeyDown={(e) => handleBlockKeyDown(block, idx, e)}
-                  onPaste={(e) => handleBlockPaste(block, idx, e)}
-                  className={`${ceBase} text-[16px] placeholder:opacity-35`}
-                  style={{ color: 'var(--ink-primary)' }}
-                />
-              </div>
-            );
-          })}
+            })}
+          </div>
         </div>
 
         {/* Click target below blocks */}
@@ -1326,7 +1316,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
       </motion.article>
 
       {/* Selection toolbar */}
-      {toolbar.visible && toolbar.blockId && (
+      {toolbar.visible && toolbar.blockIds.length > 0 && (
         <div
           data-selection-toolbar="true"
           onMouseDown={(e) => e.preventDefault()}
@@ -1342,13 +1332,14 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
         >
           {(['h1', 'h2'] as BlockType[]).map((headingType, i) => {
             const label = i === 0 ? 'H1' : 'H2';
-            const isCurrent = activeToolbarBlock?.type === headingType;
+            const isCurrent =
+              toolbarBlocks.length > 0 && toolbarBlocks.every((b) => b.type === headingType);
             return (
               <button
                 key={label}
                 type="button"
                 onClick={() =>
-                  convertBlockType(toolbar.blockId!, isCurrent ? 'paragraph' : headingType)
+                  convertBlocksType(toolbar.blockIds, isCurrent ? 'paragraph' : headingType)
                 }
                 className="rounded-md px-2 py-1 text-[13px] font-medium transition-colors"
                 style={{
@@ -1364,7 +1355,10 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           <button
             type="button"
             title="Bold (Ctrl+B / ⌘B)"
-            onMouseDown={(e) => { e.preventDefault(); applyInlineFormat('strong'); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              applyInlineFormat('strong');
+            }}
             className="rounded-md px-2 py-1 text-[13px] font-bold transition-colors"
             style={{
               backgroundColor: selectionFormats.bold ? 'var(--accent-soft)' : 'transparent',
@@ -1377,7 +1371,10 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           <button
             type="button"
             title="Italic (Ctrl+I / ⌘I)"
-            onMouseDown={(e) => { e.preventDefault(); applyInlineFormat('em'); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              applyInlineFormat('em');
+            }}
             className="rounded-md p-1.5 transition-colors hover:bg-black/5"
             style={{
               backgroundColor: selectionFormats.italic ? 'var(--accent-soft)' : 'transparent',
@@ -1390,7 +1387,10 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           <button
             type="button"
             title="Underline (Ctrl+U / ⌘U)"
-            onMouseDown={(e) => { e.preventDefault(); applyInlineFormat('u'); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              applyInlineFormat('u');
+            }}
             className="rounded-md p-1.5 transition-colors hover:bg-black/5"
             style={{
               backgroundColor: selectionFormats.underline ? 'var(--accent-soft)' : 'transparent',
@@ -1403,7 +1403,10 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           <button
             type="button"
             title="Code"
-            onMouseDown={(e) => { e.preventDefault(); applyInlineFormat('code'); }}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              applyInlineFormat('code');
+            }}
             className="rounded-md p-1.5 transition-colors hover:bg-black/5"
             style={{
               backgroundColor: selectionFormats.code ? 'var(--accent-soft)' : 'transparent',
@@ -1416,7 +1419,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           <button
             type="button"
             title="Quote Callout"
-            onClick={() => convertBlockType(toolbar.blockId!, 'callout')}
+            onClick={() => convertBlocksType(toolbar.blockIds, 'callout')}
             className="rounded-md p-1.5 transition-colors hover:bg-black/5"
           >
             <Quote className="h-3.5 w-3.5" />
@@ -1425,7 +1428,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           <button
             type="button"
             title="Bullet List"
-            onClick={() => convertBlockType(toolbar.blockId!, 'bullet')}
+            onClick={() => convertBlocksType(toolbar.blockIds, 'bullet')}
             className="rounded-md p-1.5 transition-colors hover:bg-black/5"
           >
             <List className="h-3.5 w-3.5" />
@@ -1434,7 +1437,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
           <button
             type="button"
             title="Numbered List"
-            onClick={() => convertBlockType(toolbar.blockId!, 'numbered')}
+            onClick={() => convertBlocksType(toolbar.blockIds, 'numbered')}
             className="rounded-md p-1.5 transition-colors hover:bg-black/5"
           >
             <ListOrdered className="h-3.5 w-3.5" />
