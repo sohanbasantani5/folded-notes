@@ -14,6 +14,7 @@ export interface NoteBlock {
   type: BlockType;
   content: string;
   checked?: boolean;
+  updatedAt?: number;
 }
 
 export type PaperTintId =

@@ -43,6 +43,35 @@ function inlineToHtml(content: string): string {
     .replace(/`(.+?)`/g, '<code>$1</code>');
 }
 
+function updatedAtAttr(updatedAt?: number): string {
+  return typeof updatedAt === 'number' && Number.isFinite(updatedAt) && updatedAt > 0
+    ? ` data-updated-at="${Math.trunc(updatedAt)}"`
+    : '';
+}
+
+function findRunUpdatedAt(
+  blocks: NoteBlock[],
+  startIndex: number,
+  type: NoteBlock['type']
+): number | undefined {
+  let latest: number | undefined;
+  for (let i = startIndex; i < blocks.length && blocks[i].type === type; i += 1) {
+    const ts = blocks[i].updatedAt;
+    if (typeof ts === 'number' && Number.isFinite(ts) && ts > 0) {
+      latest = latest === undefined ? ts : Math.max(latest, ts);
+    }
+  }
+  return latest;
+}
+
+function parseUpdatedAtAttr(el: Element | null | undefined): number | undefined {
+  if (!el) return undefined;
+  const raw = el.getAttribute('data-updated-at');
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function blocksToTiptapHtml(blocks: NoteBlock[]): string {
   if (!blocks || blocks.length === 0) return '<p></p>';
   const parts: string[] = [];
@@ -56,23 +85,35 @@ function blocksToTiptapHtml(blocks: NoteBlock[]): string {
     if (inTask) { parts.push('</ul>'); inTask = false; }
   };
 
-  for (const block of blocks) {
+  for (let i = 0; i < blocks.length; i += 1) {
+    const block = blocks[i];
     const html = inlineToHtml(block.content);
+    const tsAttr = updatedAtAttr(block.updatedAt);
+
     if (block.type === 'bullet') {
       if (inOl || inTask) closeLists();
-      if (!inUl) { parts.push('<ul>'); inUl = true; }
+      if (!inUl) {
+        parts.push(`<ul${updatedAtAttr(findRunUpdatedAt(blocks, i, 'bullet'))}>`);
+        inUl = true;
+      }
       parts.push(`<li><p>${html}</p></li>`);
       continue;
     }
     if (block.type === 'numbered') {
       if (inUl || inTask) closeLists();
-      if (!inOl) { parts.push('<ol>'); inOl = true; }
+      if (!inOl) {
+        parts.push(`<ol${updatedAtAttr(findRunUpdatedAt(blocks, i, 'numbered'))}>`);
+        inOl = true;
+      }
       parts.push(`<li><p>${html}</p></li>`);
       continue;
     }
     if (block.type === 'checklist') {
       if (inUl || inOl) closeLists();
-      if (!inTask) { parts.push('<ul data-type="taskList">'); inTask = true; }
+      if (!inTask) {
+        parts.push(`<ul data-type="taskList"${updatedAtAttr(findRunUpdatedAt(blocks, i, 'checklist'))}>`);
+        inTask = true;
+      }
       parts.push(
         `<li data-type="taskItem" data-checked="${block.checked ? 'true' : 'false'}"><p>${html}</p></li>`
       );
@@ -83,22 +124,22 @@ function blocksToTiptapHtml(blocks: NoteBlock[]): string {
 
     switch (block.type) {
       case 'h1':
-        parts.push(`<h1>${html}</h1>`);
+        parts.push(`<h1${tsAttr}>${html}</h1>`);
         break;
       case 'h2':
-        parts.push(`<h2>${html}</h2>`);
+        parts.push(`<h2${tsAttr}>${html}</h2>`);
         break;
       case 'callout':
-        parts.push(`<blockquote><p>${html}</p></blockquote>`);
+        parts.push(`<blockquote${tsAttr}><p>${html}</p></blockquote>`);
         break;
       case 'divider':
         parts.push('<hr>');
         break;
       case 'image':
-        parts.push(`<img src="${block.content.replace(/"/g, '&quot;')}" alt="Embedded image">`);
+        parts.push(`<img${tsAttr} src="${block.content.replace(/"/g, '&quot;')}" alt="Embedded image">`);
         break;
       default:
-        parts.push(`<p>${html}</p>`);
+        parts.push(`<p${tsAttr}>${html}</p>`);
         break;
     }
   }
@@ -112,38 +153,41 @@ function tiptapHtmlToBlocks(html: string): NoteBlock[] {
 
   for (const node of Array.from(doc.body.children)) {
     const tag = node.tagName.toLowerCase();
+    const nodeTs = parseUpdatedAtAttr(node);
     if (tag === 'h1') {
-      blocks.push(createBlock('h1', node.innerHTML));
+      blocks.push(createBlock('h1', node.innerHTML, false, nodeTs));
     } else if (tag === 'h2' || tag === 'h3') {
-      blocks.push(createBlock('h2', node.innerHTML));
+      blocks.push(createBlock('h2', node.innerHTML, false, nodeTs));
     } else if (tag === 'hr') {
       blocks.push(createBlock('divider', ''));
     } else if (tag === 'img') {
       const src = node.getAttribute('src') ?? '';
-      if (src) blocks.push(createBlock('image', src));
+      if (src) blocks.push(createBlock('image', src, false, nodeTs));
     } else if (tag === 'blockquote') {
       const inner = node.querySelector('p')?.innerHTML ?? node.innerHTML;
-      blocks.push(createBlock('callout', inner));
+      blocks.push(createBlock('callout', inner, false, nodeTs));
     } else if (tag === 'ul') {
       const isTask = node.getAttribute('data-type') === 'taskList';
       for (const li of Array.from(node.children)) {
         if (li.tagName.toLowerCase() !== 'li') continue;
         const inner = li.querySelector('p')?.innerHTML ?? li.innerHTML;
+        const liTs = parseUpdatedAtAttr(li) ?? nodeTs;
         if (isTask) {
           const checked = li.getAttribute('data-checked') === 'true';
-          blocks.push(createBlock('checklist', inner, checked));
+          blocks.push(createBlock('checklist', inner, checked, liTs));
         } else {
-          blocks.push(createBlock('bullet', inner));
+          blocks.push(createBlock('bullet', inner, false, liTs));
         }
       }
     } else if (tag === 'ol') {
       for (const li of Array.from(node.children)) {
         if (li.tagName.toLowerCase() !== 'li') continue;
         const inner = li.querySelector('p')?.innerHTML ?? li.innerHTML;
-        blocks.push(createBlock('numbered', inner));
+        const liTs = parseUpdatedAtAttr(li) ?? nodeTs;
+        blocks.push(createBlock('numbered', inner, false, liTs));
       }
     } else {
-      blocks.push(createBlock('paragraph', node.innerHTML));
+      blocks.push(createBlock('paragraph', node.innerHTML, false, nodeTs));
     }
   }
 
@@ -222,7 +266,7 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
   return (
     <div
       onClick={handleCanvasClick}
-      className="print-only-canvas relative h-full w-full overflow-y-auto cursor-text"
+      className="print-only-canvas relative h-full w-full overflow-y-auto overflow-x-hidden cursor-text"
       style={{ backgroundColor: 'var(--bg-canvas)', perspective: '1200px' }}
     >
       {/* Quiet top-right Undo / Redo / Copy Note bar (main view) */}
@@ -323,6 +367,8 @@ export const BlockEditor: React.FC<BlockEditorProps> = ({
         <RichEditorSurface
           docKey={note.id}
           contentHtml={contentHtml}
+          showMarginDates={!focusMode}
+          compactMarginDates={isSplitPane}
           onChangeHtml={handleChangeHtml}
           onEditorReady={handleEditorReady}
         />

@@ -134,6 +134,7 @@ export default function App() {
   const [unfoldKey, setUnfoldKey] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [includeEditDates, setIncludeEditDates] = useState(false);
 
   const [customMascotUrl, setCustomMascotUrl] = useState<string | null>(null);
   const [customVideoUrl, setCustomVideoUrl] = useState<string | null>(null);
@@ -396,19 +397,33 @@ const handleMoveNote = useCallback((noteId: string, direction: 'up' | 'down') =>
       if (format === 'pdf') {
         triggerMascotBounce();
         showNotice('Choose "Save as PDF" in the print dialog');
+        const runPrint = () => {
+          if (includeEditDates) {
+            document.documentElement.dataset.printEditDates = 'true';
+            const cleanup = () => {
+              delete document.documentElement.dataset.printEditDates;
+              window.removeEventListener('afterprint', cleanup);
+            };
+            window.addEventListener('afterprint', cleanup);
+            window.setTimeout(cleanup, 60000);
+          } else {
+            delete document.documentElement.dataset.printEditDates;
+          }
+          window.print();
+        };
         if (viewMode === 'grid') {
           setViewMode('editor');
-          setTimeout(() => window.print(), 180);
+          setTimeout(runPrint, 180);
         } else {
-          window.print();
+          runPrint();
         }
         return;
       }
-      const filename = exportNoteToFormat(activeNote, notes, format);
+      const filename = exportNoteToFormat(activeNote, notes, format, includeEditDates);
       triggerMascotBounce();
       showNotice(`Saved ${filename}`);
     },
-    [activeNote, notes, showNotice, triggerMascotBounce, viewMode]
+    [activeNote, includeEditDates, notes, showNotice, triggerMascotBounce, viewMode]
   );
 
   const handleToggleFullscreen = useCallback(async () => {
@@ -424,6 +439,7 @@ const handleMoveNote = useCallback((noteId: string, direction: 'up' | 'down') =>
   }, [showNotice]);
 
   const handlePrint = useCallback(() => {
+    delete document.documentElement.dataset.printEditDates;
     if (viewMode === 'grid') {
       setViewMode('editor');
       setTimeout(() => window.print(), 160);
@@ -514,6 +530,8 @@ const handleMoveNote = useCallback((noteId: string, direction: 'up' | 'down') =>
         onToggleFullscreen={handleToggleFullscreen}
         onPrint={handlePrint}
         onOpenSettings={() => setSettingsOpen(true)}
+        includeEditDates={includeEditDates}
+        onToggleIncludeEditDates={() => setIncludeEditDates((v) => !v)}
       />
 
       {settings.sidebarCollapsed && !settings.focusMode && (

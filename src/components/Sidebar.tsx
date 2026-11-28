@@ -131,6 +131,8 @@ interface SidebarProps {
   onToggleFullscreen: () => void;
   onPrint: () => void;
   onOpenSettings: () => void;
+  includeEditDates: boolean;
+  onToggleIncludeEditDates: () => void;
 }
 
 const EXPORT_OPTIONS: { format: ExportFormat; label: string; ext: string }[] = [
@@ -166,6 +168,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onToggleFullscreen,
   onPrint,
   onOpenSettings,
+  includeEditDates,
+  onToggleIncludeEditDates,
 }) => {
   const [exportOpen, setExportOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -366,6 +370,42 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       </span>
                     </button>
                   ))}
+
+                  <div
+                    className="mt-1 pt-1"
+                    style={{ borderTop: '1px solid var(--border-hairline)' }}
+                  >
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={includeEditDates}
+                      onClick={onToggleIncludeEditDates}
+                      className="folio-hover-surface flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[11.5px] transition-colors duration-150"
+                      style={{ color: 'var(--ink-secondary)' }}
+                    >
+                      <span>Include edit dates</span>
+                      <span
+                        className="relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors duration-200"
+                        style={{
+                          backgroundColor: includeEditDates
+                            ? 'var(--accent)'
+                            : 'var(--border-strong)',
+                        }}
+                      >
+                        <span
+                          className="inline-block h-3 w-3 rounded-full transition-transform duration-200"
+                          style={{
+                            backgroundColor: includeEditDates
+                              ? 'var(--accent-ink)'
+                              : 'var(--bg-surface)',
+                            transform: includeEditDates
+                              ? 'translateX(14px)'
+                              : 'translateX(2px)',
+                          }}
+                        />
+                      </span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

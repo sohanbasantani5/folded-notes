@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useEditor, EditorContent, Editor } from '@tiptap/react';
+import { useEditor, EditorContent, Editor, Extension } from '@tiptap/react';
+import { Plugin, PluginKey } from '@tiptap/pm/state';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import TaskList from '@tiptap/extension-task-list';
@@ -18,6 +19,12 @@ import {
   Underline as UnderlineIcon,
 } from 'lucide-react';
 import { BlockType } from '../types/note';
+import {
+  formatExportDateTag,
+  formatFullEditTimestamp,
+  formatMarginEditDate,
+  toCalendarDateKey,
+} from '../utils/blocks';
 import { filterSlashCommands, SlashMenu } from './SlashMenu';
 
 export interface RichEditorSurfaceProps {
@@ -27,12 +34,204 @@ export interface RichEditorSurfaceProps {
   contentHtml: string;
   /** Placeholder text when empty. */
   placeholder?: string;
+  /** Whether to show quiet right-margin edit date labels. */
+  showMarginDates?: boolean;
+  /** Whether there is no outer right margin (e.g. Split Screen pane). */
+  compactMarginDates?: boolean;
   /** Called whenever the editor HTML changes. */
   onChangeHtml: (html: string) => void;
   /** Called when the Tiptap Editor instance is created or updated. */
   onEditorReady?: (editor: Editor | null) => void;
   /** Optional className for the wrapper. */
   className?: string;
+}
+
+const TIMESTAMP_NODE_TYPES = [
+  'paragraph',
+  'heading',
+  'bulletList',
+  'orderedList',
+  'taskList',
+  'blockquote',
+  'image',
+] as const;
+
+const TIMESTAMP_NODE_SET = new Set<string>(TIMESTAMP_NODE_TYPES);
+const blockTimestampPluginKey = new PluginKey('blockTimestamp');
+
+const BlockTimestamp = Extension.create({
+  name: 'blockTimestamp',
+
+  addGlobalAttributes() {
+    return [
+      {
+        types: [...TIMESTAMP_NODE_TYPES],
+        attributes: {
+          updatedAt: {
+            default: null,
+            parseHTML: (element) => {
+              const raw = element.getAttribute('data-updated-at');
+              if (!raw) return null;
+              const parsed = Number(raw);
+              return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+            },
+            renderHTML: (attributes) => {
+              if (!attributes.updatedAt) return {};
+              return { 'data-updated-at': String(attributes.updatedAt) };
+            },
+          },
+        },
+      },
+    ];
+  },
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: blockTimestampPluginKey,
+        appendTransaction(transactions, _oldState, newState) {
+          const activeTrs = transactions.filter(
+            (tr) =>
+              tr.docChanged &&
+              !tr.getMeta('preventUpdate') &&
+              !tr.getMeta('history$') &&
+              !tr.getMeta('blockTimestampApplied') &&
+              !tr.getMeta('skipBlockTimestamp')
+          );
+          if (activeTrs.length === 0) return null;
+
+          const activeSet = new Set(activeTrs);
+          const touchedTopPositions = new Set<number>();
+
+          const addTopBlockAtPos = (pos: number) => {
+            const clamped = Math.max(0, Math.min(pos, newState.doc.content.size));
+            const $r = newState.doc.resolve(clamped);
+            if ($r.depth >= 1) {
+              touchedTopPositions.add($r.before(1));
+            }
+          };
+
+          for (let tIdx = 0; tIdx < transactions.length; tIdx += 1) {
+            const tr = transactions[tIdx];
+            if (!activeSet.has(tr)) continue;
+
+            for (let sIdx = 0; sIdx < tr.steps.length; sIdx += 1) {
+              const step = tr.steps[sIdx];
+              const stepBeforeDoc = tr.docs[sIdx];
+              const stepMap = tr.mapping.maps[sIdx];
+
+              const maybeStepPos = (step as unknown as { pos?: unknown }).pos;
+              if (typeof maybeStepPos === 'number') {
+                let mappedPos = maybeStepPos;
+                for (let k = sIdx + 1; k < tr.mapping.maps.length; k += 1) {
+                  mappedPos = tr.mapping.maps[k].map(mappedPos, 1);
+                }
+                for (let tNext = tIdx + 1; tNext < transactions.length; tNext += 1) {
+                  mappedPos = transactions[tNext].mapping.map(mappedPos, 1);
+                }
+                addTopBlockAtPos(mappedPos);
+              }
+
+              stepMap.forEach((_oldStart, _oldEnd, newStart, newEnd) => {
+                let effectiveNewStart = newStart;
+                let effectiveNewEnd = newEnd;
+
+                const maybeReplace = step as unknown as {
+                  from?: number;
+                  to?: number;
+                  slice?: { size: number; openStart: number; content: { childCount: number } };
+                };
+                if (
+                  typeof maybeReplace.from === 'number' &&
+                  typeof maybeReplace.to === 'number' &&
+                  maybeReplace.from === maybeReplace.to &&
+                  maybeReplace.slice &&
+                  maybeReplace.slice.size > 0 &&
+                  maybeReplace.slice.openStart >= 1 &&
+                  maybeReplace.slice.content.childCount >= 2 &&
+                  stepBeforeDoc
+                ) {
+                  const $oldFrom = stepBeforeDoc.resolve(maybeReplace.from);
+                  if ($oldFrom.depth === 1) {
+                    if (
+                      $oldFrom.parentOffset === $oldFrom.parent.content.size &&
+                      effectiveNewStart < effectiveNewEnd
+                    ) {
+                      effectiveNewStart += 1;
+                    } else if (
+                      $oldFrom.parentOffset === 0 &&
+                      $oldFrom.parent.content.size > 0 &&
+                      effectiveNewEnd > effectiveNewStart
+                    ) {
+                      effectiveNewEnd -= 1;
+                    }
+                  }
+                }
+
+                let mappedFrom = effectiveNewStart;
+                let mappedTo = effectiveNewEnd;
+                const isRange = mappedFrom < mappedTo;
+
+                for (let k = sIdx + 1; k < tr.mapping.maps.length; k += 1) {
+                  mappedFrom = tr.mapping.maps[k].map(mappedFrom, isRange ? 1 : 0);
+                  mappedTo = tr.mapping.maps[k].map(mappedTo, isRange ? -1 : 0);
+                }
+                for (let tNext = tIdx + 1; tNext < transactions.length; tNext += 1) {
+                  mappedFrom = transactions[tNext].mapping.map(mappedFrom, isRange ? 1 : 0);
+                  mappedTo = transactions[tNext].mapping.map(mappedTo, isRange ? -1 : 0);
+                }
+
+                newState.doc.forEach((_node, nodePos, _index) => {
+                  const node = newState.doc.nodeAt(nodePos);
+                  if (!node) return;
+                  const nodeEnd = nodePos + node.nodeSize;
+                  const overlaps =
+                    mappedFrom === mappedTo
+                      ? mappedFrom > nodePos && mappedFrom < nodeEnd
+                      : nodeEnd > mappedFrom && nodePos < mappedTo;
+                  if (overlaps) {
+                    touchedTopPositions.add(nodePos);
+                  }
+                });
+              });
+            }
+          }
+
+          if (touchedTopPositions.size === 0) return null;
+
+          const now = Date.now();
+          const outTr = newState.tr;
+          let modified = false;
+
+          newState.doc.forEach((node, nodePos) => {
+            if (!touchedTopPositions.has(nodePos)) return;
+            if (!TIMESTAMP_NODE_SET.has(node.type.name)) return;
+            const prevTs = node.attrs.updatedAt as number | null | undefined;
+            if (!prevTs || Math.abs(now - prevTs) >= 1000) {
+              outTr.setNodeMarkup(nodePos, undefined, {
+                ...node.attrs,
+                updatedAt: now,
+              });
+              modified = true;
+            }
+          });
+
+          if (!modified) return null;
+          outTr.setMeta('blockTimestampApplied', true);
+          return outTr;
+        },
+      }),
+    ];
+  },
+});
+
+interface MarginDateLabel {
+  key: string;
+  label: string;
+  exportLabel: string;
+  tooltip: string;
+  top: number;
+  blockTop: number;
 }
 
 interface SlashState {
@@ -107,13 +306,18 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
   docKey,
   contentHtml,
   placeholder = 'Begin writing, or type "/" for commands...',
+  showMarginDates = false,
+  compactMarginDates = false,
   onChangeHtml,
   onEditorReady,
   className,
 }) => {
   const [slash, setSlash] = useState<SlashState>(INITIAL_SLASH_STATE);
   const [toolbar, setToolbar] = useState<SelectionToolbarState>(INITIAL_TOOLBAR_STATE);
+  const [marginLabels, setMarginLabels] = useState<MarginDateLabel[]>([]);
+  const [isCompactMargin, setIsCompactMargin] = useState<boolean>(compactMarginDates);
 
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
   const isInternalUpdateRef = useRef(false);
   const lastDocKeyRef = useRef(docKey);
   const lastExternalHtmlRef = useRef(contentHtml);
@@ -137,6 +341,7 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
       Placeholder.configure({ placeholder }),
       Image.configure({ inline: false, allowBase64: true }),
       Link.configure({ openOnClick: true, autolink: true, linkOnPaste: true }),
+      BlockTimestamp,
     ],
     content: contentHtml,
     editorProps: {
@@ -219,6 +424,70 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
     },
   });
 
+  const recomputeMarginLabels = useCallback(() => {
+    const wrapperEl = wrapperRef.current;
+    if (!editor || !showMarginDates || !wrapperEl || editor.isDestroyed) {
+      setMarginLabels([]);
+      return;
+    }
+
+    const wrapperRect = wrapperEl.getBoundingClientRect();
+    const scrollContainer = wrapperEl.closest('.overflow-y-auto');
+    const containerRight = scrollContainer
+      ? scrollContainer.getBoundingClientRect().right
+      : window.innerWidth;
+    const spaceOnRight = containerRight - wrapperRect.right;
+    setIsCompactMargin(compactMarginDates || spaceOnRight < 96);
+
+    const nextLabels: MarginDateLabel[] = [];
+    let prevDateKey: string | null = null;
+    const nowTs = Date.now();
+
+    editor.state.doc.forEach((node, offset) => {
+      if (node.type.name === 'horizontalRule') {
+        return;
+      }
+
+      const rawTs = node.attrs.updatedAt;
+      const ts =
+        typeof rawTs === 'number' && Number.isFinite(rawTs) && rawTs > 0
+          ? rawTs
+          : null;
+      const dateKey = ts ? toCalendarDateKey(ts) : null;
+
+      if (ts && dateKey && dateKey !== prevDateKey) {
+        const dom = editor.view.nodeDOM(offset);
+        if (dom instanceof HTMLElement) {
+          const firstLineEl = dom.matches('ul, ol, blockquote')
+            ? dom.querySelector('p, li') ?? dom
+            : dom;
+          const targetRect = firstLineEl.getBoundingClientRect();
+          const lineHeight = parseFloat(window.getComputedStyle(firstLineEl).lineHeight);
+          const effectiveLh = Number.isFinite(lineHeight) ? lineHeight : 24;
+          const blockTop = dom.getBoundingClientRect().top - wrapperRect.top;
+          const firstLineTop = targetRect.top - wrapperRect.top;
+          const alignedTop =
+            dom.tagName === 'IMG'
+              ? firstLineTop + 6
+              : firstLineTop + Math.max(0, (effectiveLh - 16) / 2);
+
+          nextLabels.push({
+            key: `${offset}-${dateKey}`,
+            label: formatMarginEditDate(ts, nowTs),
+            exportLabel: formatExportDateTag(ts),
+            tooltip: formatFullEditTimestamp(ts),
+            top: alignedTop,
+            blockTop,
+          });
+        }
+      }
+
+      prevDateKey = dateKey;
+    });
+
+    setMarginLabels(nextLabels);
+  }, [editor, showMarginDates, compactMarginDates]);
+
   useEffect(() => {
     onEditorReady?.(editor ?? null);
   }, [editor, onEditorReady]);
@@ -233,17 +502,56 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
       editor.commands.setContent(contentHtml, { emitUpdate: false });
       setSlash(INITIAL_SLASH_STATE);
       setToolbar(INITIAL_TOOLBAR_STATE);
+      requestAnimationFrame(recomputeMarginLabels);
       return;
     }
     if (isInternalUpdateRef.current) {
       isInternalUpdateRef.current = false;
+      requestAnimationFrame(recomputeMarginLabels);
       return;
     }
     if (contentHtml !== lastExternalHtmlRef.current) {
       lastExternalHtmlRef.current = contentHtml;
       editor.commands.setContent(contentHtml, { emitUpdate: false });
+      requestAnimationFrame(recomputeMarginLabels);
     }
-  }, [docKey, contentHtml, editor]);
+  }, [docKey, contentHtml, editor, recomputeMarginLabels]);
+
+  // Recompute margin labels on resize, layout transitions, and editor updates
+  useEffect(() => {
+    if (!editor || !showMarginDates) {
+      setMarginLabels([]);
+      return;
+    }
+
+    let rafId = requestAnimationFrame(recomputeMarginLabels);
+    const settleTimer = window.setTimeout(recomputeMarginLabels, 380);
+    const schedule = () => {
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(recomputeMarginLabels);
+    };
+
+    editor.on('update', schedule);
+    window.addEventListener('resize', schedule);
+    document.fonts?.ready?.then(schedule).catch(() => {});
+
+    const wrapperEl = wrapperRef.current;
+    const scrollContainer = wrapperEl?.closest('.overflow-y-auto') ?? null;
+    const ro =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(schedule)
+        : null;
+    if (ro && wrapperEl) ro.observe(wrapperEl);
+    if (ro && scrollContainer) ro.observe(scrollContainer);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.clearTimeout(settleTimer);
+      editor.off('update', schedule);
+      window.removeEventListener('resize', schedule);
+      ro?.disconnect();
+    };
+  }, [editor, showMarginDates, recomputeMarginLabels]);
 
   // Close toolbar on outside mousedown
   useEffect(() => {
@@ -340,7 +648,11 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
   );
 
   return (
-    <div className={className} onKeyDownCapture={handleEditorKeyDownCapture}>
+    <div
+      ref={wrapperRef}
+      className={className ? `relative ${className}` : 'relative'}
+      onKeyDownCapture={handleEditorKeyDownCapture}
+    >
       <input
         ref={imageInputRef}
         type="file"
@@ -359,6 +671,41 @@ export const RichEditorSurface: React.FC<RichEditorSurfaceProps> = ({
         }}
       />
       <EditorContent editor={editor} />
+
+      {showMarginDates && marginLabels.length > 0 && (
+        <div
+          aria-hidden="true"
+          className="no-print folio-print-gutter pointer-events-none absolute inset-0 z-10"
+        >
+          {marginLabels.map((item) => {
+            const compactTop = Math.max(-14, item.blockTop - 13);
+            return (
+              <span
+                key={item.key}
+                title={item.tooltip}
+                className={`folio-margin-date-label pointer-events-auto absolute select-none whitespace-nowrap ${
+                  isCompactMargin ? 'folio-margin-date-label--compact' : ''
+                }`}
+                style={
+                  {
+                    '--compact-top': `${compactTop}px`,
+                    top: isCompactMargin ? `${compactTop}px` : `${item.top}px`,
+                    ...(isCompactMargin ? { right: 0 } : { left: 'calc(100% + 24px)' }),
+                    fontSize: isCompactMargin ? '10.5px' : '11px',
+                    lineHeight: isCompactMargin ? '12px' : '16px',
+                    color: 'var(--ink-muted)',
+                    userSelect: 'none',
+                    WebkitUserSelect: 'none',
+                  } as React.CSSProperties & Record<'--compact-top', string>
+                }
+              >
+                <span className="folio-margin-screen-text">{item.label}</span>
+                <span className="folio-margin-print-text">{item.exportLabel}</span>
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       {toolbar.visible && editor && (
         <div

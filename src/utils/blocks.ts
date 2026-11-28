@@ -28,14 +28,81 @@ export function createId(): string {
 export function createBlock(
   type: BlockType = 'paragraph',
   content = '',
-  checked = false
+  checked = false,
+  updatedAt?: number
 ): NoteBlock {
   return {
     id: createId(),
     type,
     content,
     ...(type === 'checklist' ? { checked } : {}),
+    ...(typeof updatedAt === 'number' && Number.isFinite(updatedAt) && updatedAt > 0
+      ? { updatedAt }
+      : {}),
   };
+}
+
+const SHORT_MONTHS = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+
+export function toCalendarDateKey(timestamp: number): string {
+  const d = new Date(timestamp);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function formatMarginEditDate(timestamp: number, nowTs = Date.now()): string {
+  const date = new Date(timestamp);
+  const now = new Date(nowTs);
+
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const targetStart = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const dayDiff = Math.round((todayStart - targetStart) / 86400000);
+
+  if (dayDiff === 0) return 'Today';
+  if (dayDiff === 1) return 'Yesterday';
+
+  const day = date.getDate();
+  const month = SHORT_MONTHS[date.getMonth()];
+  if (date.getFullYear() === now.getFullYear()) {
+    return `${day} ${month}`;
+  }
+  return `${day} ${month} ${date.getFullYear()}`;
+}
+
+export function formatFullEditTimestamp(timestamp: number): string {
+  const date = new Date(timestamp);
+  const day = date.getDate();
+  const month = SHORT_MONTHS[date.getMonth()];
+  const year = date.getFullYear();
+  const time = date.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+  return `Updated ${day} ${month} ${year}, ${time}`;
+}
+
+export function formatExportDateTag(timestamp: number): string {
+  const date = new Date(timestamp);
+  const day = date.getDate();
+  const month = SHORT_MONTHS[date.getMonth()];
+  const year = date.getFullYear();
+  return `Updated ${day} ${month} ${year}`;
 }
 
 export function countNoteStats(title: string, blocks: NoteBlock[]): {
@@ -78,14 +145,33 @@ export function getNotePlainPreview(note: Note, maxLength = 150): string {
   return `${joined.slice(0, maxLength).trimEnd()}…`;
 }
 
-export function blocksToMarkdown(title: string, blocks: NoteBlock[]): string {
+export function blocksToMarkdown(
+  title: string,
+  blocks: NoteBlock[],
+  includeEditDates = false
+): string {
   const lines: string[] = [];
   if (title.trim()) {
     lines.push(`# ${title.trim()}`, '');
   }
   let numberedIndex = 0;
+  let prevDateKey: string | null = null;
 
   for (const block of blocks) {
+    const dateKey =
+      typeof block.updatedAt === 'number' && block.updatedAt > 0
+        ? toCalendarDateKey(block.updatedAt)
+        : null;
+    if (includeEditDates && block.updatedAt && dateKey && dateKey !== prevDateKey) {
+      if (lines.length > 0 && lines[lines.length - 1] !== '') {
+        lines.push('');
+      }
+      lines.push(`[${formatExportDateTag(block.updatedAt)}]`);
+    }
+    if (block.type !== 'divider') {
+      prevDateKey = dateKey;
+    }
+
     if (block.type === 'numbered') {
       numberedIndex += 1;
     } else {
@@ -127,14 +213,33 @@ export function blocksToMarkdown(title: string, blocks: NoteBlock[]): string {
   return lines.join('\n');
 }
 
-export function blocksToPlainText(title: string, blocks: NoteBlock[]): string {
+export function blocksToPlainText(
+  title: string,
+  blocks: NoteBlock[],
+  includeEditDates = false
+): string {
   const lines: string[] = [];
   if (title.trim()) {
     lines.push(title.trim(), '');
   }
   let numberedIndex = 0;
+  let prevDateKey: string | null = null;
 
   for (const block of blocks) {
+    const dateKey =
+      typeof block.updatedAt === 'number' && block.updatedAt > 0
+        ? toCalendarDateKey(block.updatedAt)
+        : null;
+    if (includeEditDates && block.updatedAt && dateKey && dateKey !== prevDateKey) {
+      if (lines.length > 0 && lines[lines.length - 1] !== '') {
+        lines.push('');
+      }
+      lines.push(`[${formatExportDateTag(block.updatedAt)}]`);
+    }
+    if (block.type !== 'divider') {
+      prevDateKey = dateKey;
+    }
+
     if (block.type === 'numbered') {
       numberedIndex += 1;
     } else {
@@ -180,11 +285,16 @@ function escapeHtml(input: string): string {
     .replace(/'/g, '&#39;');
 }
 
-export function blocksToHtmlDocument(title: string, blocks: NoteBlock[]): string {
+export function blocksToHtmlDocument(
+  title: string,
+  blocks: NoteBlock[],
+  includeEditDates = false
+): string {
   const safeTitle = escapeHtml(title.trim() || 'Untitled Note');
   const bodyParts: string[] = [];
   let inUl = false;
   let inOl = false;
+  let prevDateKey: string | null = null;
 
   const closeLists = () => {
     if (inUl) { bodyParts.push('</ul>'); inUl = false; }
@@ -192,6 +302,19 @@ export function blocksToHtmlDocument(title: string, blocks: NoteBlock[]): string
   };
 
   for (const block of blocks) {
+    const dateKey =
+      typeof block.updatedAt === 'number' && block.updatedAt > 0
+        ? toCalendarDateKey(block.updatedAt)
+        : null;
+    const showDateTag =
+      includeEditDates && block.updatedAt && dateKey && dateKey !== prevDateKey;
+    const dateTagHtml = showDateTag && block.updatedAt
+      ? `<div class="edit-date-tag">${escapeHtml(formatExportDateTag(block.updatedAt))}</div>`
+      : '';
+    if (block.type !== 'divider') {
+      prevDateKey = dateKey;
+    }
+
     // If content has HTML tags use it directly (already safe, from contentEditable)
     // Otherwise escape it (legacy plain-text notes)
     const hasHtml = /<[a-z][\s\S]*>/i.test(block.content);
@@ -201,18 +324,29 @@ export function blocksToHtmlDocument(title: string, blocks: NoteBlock[]): string
 
     if (block.type === 'bullet') {
       if (inOl) closeLists();
-      if (!inUl) { bodyParts.push('<ul>'); inUl = true; }
+      if (!inUl) {
+        if (dateTagHtml) bodyParts.push(dateTagHtml);
+        bodyParts.push('<ul>');
+        inUl = true;
+      }
       bodyParts.push(`<li>${safe}</li>`);
       continue;
     }
     if (block.type === 'numbered') {
       if (inUl) closeLists();
-      if (!inOl) { bodyParts.push('<ol>'); inOl = true; }
+      if (!inOl) {
+        if (dateTagHtml) bodyParts.push(dateTagHtml);
+        bodyParts.push('<ol>');
+        inOl = true;
+      }
       bodyParts.push(`<li>${safe}</li>`);
       continue;
     }
 
     closeLists();
+    if (dateTagHtml) {
+      bodyParts.push(dateTagHtml);
+    }
 
     switch (block.type) {
       case 'h1':
@@ -261,6 +395,7 @@ export function blocksToHtmlDocument(title: string, blocks: NoteBlock[]): string
     hr { border: 0; border-top: 1px solid #E2E0D9; margin: 24px 0; }
     ul, ol { padding-left: 22px; margin: 0.7em 0; }
     li { margin: 0.35em 0; }
+    .edit-date-tag { text-align: right; font-size: 11px; color: #848179; margin: 14px 0 4px; letter-spacing: 0.01em; }
   </style>
 </head>
 <body>
@@ -351,7 +486,8 @@ export function triggerFileDownload(content: string, filename: string, mimeType:
 export function exportNoteToFormat(
   note: Note,
   allNotes: Note[],
-  format: ExportFormat
+  format: ExportFormat,
+  includeEditDates = false
 ): string {
   const baseName = slugifyFilename(note.title);
 
@@ -359,7 +495,7 @@ export function exportNoteToFormat(
     case 'txt': {
       const filename = `${baseName}.txt`;
       triggerFileDownload(
-        blocksToPlainText(note.title, note.blocks),
+        blocksToPlainText(note.title, note.blocks, includeEditDates),
         filename,
         'text/plain;charset=utf-8'
       );
@@ -368,7 +504,7 @@ export function exportNoteToFormat(
     case 'md': {
       const filename = `${baseName}.md`;
       triggerFileDownload(
-        blocksToMarkdown(note.title, note.blocks),
+        blocksToMarkdown(note.title, note.blocks, includeEditDates),
         filename,
         'text/markdown;charset=utf-8'
       );
@@ -377,7 +513,7 @@ export function exportNoteToFormat(
     case 'html': {
       const filename = `${baseName}.html`;
       triggerFileDownload(
-        blocksToHtmlDocument(note.title, note.blocks),
+        blocksToHtmlDocument(note.title, note.blocks, includeEditDates),
         filename,
         'text/html;charset=utf-8'
       );
@@ -385,7 +521,7 @@ export function exportNoteToFormat(
     }
     case 'doc': {
       const filename = `${baseName}.doc`;
-      const htmlDoc = blocksToHtmlDocument(note.title, note.blocks);
+      const htmlDoc = blocksToHtmlDocument(note.title, note.blocks, includeEditDates);
       const wordHtml = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">${htmlDoc.slice(
         htmlDoc.indexOf('<head>')
       )}`;

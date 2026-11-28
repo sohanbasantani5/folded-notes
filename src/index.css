@@ -241,6 +241,29 @@ input:focus-visible {
   .print-divider {
     border-top: 1px solid #D4D4D4 !important;
   }
+
+  html[data-print-edit-dates="true"] .folio-print-gutter {
+    display: block !important;
+  }
+
+  html[data-print-edit-dates="true"] .folio-margin-date-label {
+    display: block !important;
+    left: auto !important;
+    right: 0 !important;
+    top: var(--compact-top) !important;
+    font-size: 10.5px !important;
+    line-height: 12px !important;
+    color: #848179 !important;
+    opacity: 0.78 !important;
+  }
+
+  html[data-print-edit-dates="true"] .folio-margin-screen-text {
+    display: none !important;
+  }
+
+  html[data-print-edit-dates="true"] .folio-margin-print-text {
+    display: inline !important;
+  }
 }
 
 /* ── contentEditable blocks ───────────────────────────────────────────────── */
@@ -460,4 +483,26 @@ input:focus-visible {
   text-decoration: underline;
   text-underline-offset: 2px;
   cursor: pointer;
+}
+
+/* Quiet right-margin per-block edit date labels */
+.folio-margin-date-label {
+  opacity: 0.55;
+  transition: opacity 180ms var(--ease-editorial);
+}
+
+.folio-margin-date-label:hover {
+  opacity: 0.9;
+}
+
+.folio-margin-date-label--compact {
+  opacity: 0.42;
+}
+
+.folio-margin-date-label--compact:hover {
+  opacity: 0.9;
+}
+
+.folio-margin-print-text {
+  display: none;
 }
